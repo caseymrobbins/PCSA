@@ -1,0 +1,13 @@
+[project]
+name = "pcsa"
+version = "0.1.0"
+description = "Simulation suite for Prediction, Control, and the Second Agent"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[tool.setuptools]
+packages = ["pcsa"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
