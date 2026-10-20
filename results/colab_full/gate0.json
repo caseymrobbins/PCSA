@@ -1,0 +1,29 @@
+{
+  "gate0_passed": false,
+  "gate0": [
+    {
+      "reward": "replication",
+      "gamma": 0.95,
+      "action_match": 0.612875,
+      "sign_match": 0.595125,
+      "visits": 8000,
+      "learner_return": 2.671506348447656,
+      "best_script_return": 2.6727477943460936,
+      "optimum": 4.020774399719123,
+      "return_ratio": 0.6644258251928479,
+      "pass": false
+    },
+    {
+      "reward": "general",
+      "gamma": 0.95,
+      "action_match": 0.5795,
+      "sign_match": 0.718875,
+      "visits": 8000,
+      "learner_return": 2.789873757382031,
+      "best_script_return": 2.6727477943460936,
+      "optimum": 4.969465764020812,
+      "return_ratio": 0.561403154757773,
+      "pass": false
+    }
+  ]
+}

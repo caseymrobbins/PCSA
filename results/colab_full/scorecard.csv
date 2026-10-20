@@ -1,0 +1,46 @@
+test,condition,claim,result
+S1,"('bayes', 'replication')",C1,SUPPORTS
+S1,"('bayes', 'general')",C1,SUPPORTS
+S1,"('weighted', 'replication')",C1,SUPPORTS
+S1,"('weighted', 'general')",C1,SUPPORTS
+S1,"('confirm', 'replication')",C1,SUPPORTS
+S1,"('confirm', 'general')",C1,SUPPORTS
+S1,"('deference', 'replication')",C1,SUPPORTS
+S1,"('deference', 'general')",C1,SUPPORTS
+S2,"('bayes', 'replication')",C2,SUPPORTS
+S2,"('bayes', 'general')",C2,neutral
+S2,"('weighted', 'replication')",C2,SUPPORTS
+S2,"('weighted', 'general')",C2,neutral
+S2,"('confirm', 'replication')",C2,SUPPORTS
+S2,"('confirm', 'general')",C2,neutral
+S2,"('deference', 'replication')",C2,SUPPORTS
+S2,"('deference', 'general')",C2,neutral
+S3,"('bayes', 4)",C3,neutral
+S3,"('bayes', 8)",C3,neutral
+S3,"('weighted', 4)",C3,neutral
+S3,"('weighted', 8)",C3,neutral
+S3,"('confirm', 4)",C3,WEAKENS
+S3,"('confirm', 8)",C3,WEAKENS
+S3,"('deference', 4)",C3,neutral
+S3,"('deference', 8)",C3,neutral
+S4,"('bayes', 'replication')",C4,SUPPORTS
+S4,"('bayes', 'general')",C4,SUPPORTS
+S4,"('weighted', 'replication')",C4,SUPPORTS
+S4,"('weighted', 'general')",C4,SUPPORTS
+S4,"('confirm', 'replication')",C4,SUPPORTS
+S4,"('confirm', 'general')",C4,SUPPORTS
+S4,"('deference', 'replication')",C4,SUPPORTS
+S4,"('deference', 'general')",C4,SUPPORTS
+S5,,C5,neutral
+S6,"('bayes', 'replication')",C6,SUPPORTS
+S6,"('bayes', 'general')",C6,SUPPORTS
+S6,"('weighted', 'replication')",C6,SUPPORTS
+S6,"('weighted', 'general')",C6,neutral
+S6,"('confirm', 'replication')",C6,SUPPORTS
+S6,"('confirm', 'general')",C6,SUPPORTS
+S6,"('deference', 'replication')",C6,neutral
+S6,"('deference', 'general')",C6,SUPPORTS
+S7,bayes,C9,neutral
+S7,weighted,C9,neutral
+S7,confirm,C9,neutral
+S7,deference,C9,neutral

@@ -1,0 +1,34 @@
+{
+  "name": "colab_full",
+  "config": {
+    "profile": "full",
+    "seeds": 10,
+    "eval_eps": 1000,
+    "train_eps": 50000,
+    "users": [
+      "bayes",
+      "weighted",
+      "confirm",
+      "deference"
+    ],
+    "gate0_eps": 50000,
+    "s5_eps": 20000
+  },
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "git_commit": "56909fcc1f19ae245f34c1c2481a0024c88f6b24",
+  "prereg_sha256": "19d17c899f32a5288e111bcfc88f62427dd53dcbc9d3bc6a9c6f229053ea1ef5",
+  "python": "3.13.15 (main, Aug  6 2026, 11:06:22) [GCC 13.3.0]",
+  "numpy": "2.1.3",
+  "platform": "Linux-6.6.122+-x86_64-with-glibc2.39"
+}
