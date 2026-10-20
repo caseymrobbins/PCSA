@@ -14,6 +14,21 @@ def test_gate0_runs_and_reports_automatically():
     assert E.gate0_myopic_equivalence()["pass"]
 
 
+def test_gate_binding_marks_learner_tests_uninterpretable():
+    from pcsa import report
+    v = {"S2": {"claim": "C2", "status": "supports"}, "S1": {"claim": "C1", "status": "supports"}}
+    t = report.verdict_table(v, gate0_passed=False)
+    assert t.loc[t.test == "S2", "result"].iloc[0].startswith("UNINTERPRETABLE")
+    assert t.loc[t.test == "S1", "result"].iloc[0] == "SUPPORTS"
+    assert report.verdict_table(v, gate0_passed=True).loc[0, "result"] == "SUPPORTS"
+
+
+def test_solver_study_runs_exact_and_task_reward_has_no_correction_effect():
+    r = E.solver_study("tiny", gammas=(0.0, 0.95), rewards=("general", "task"), B=50, n_jobs=1)
+    assert all(v["exact"] for v in r["verdict"].values())
+    assert np.allclose(r["res"]["task"][0.95]["dV"], 0.0)
+
+
 def test_s1_selective_beats_balanced_for_bayes_user():
     r = E.s1("tiny", n_jobs=1)
     v = r["verdict"][("bayes", "replication")]

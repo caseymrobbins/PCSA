@@ -12,13 +12,21 @@ def ci(x, nd=2):
     return f"{m:.{nd}f} [{lo:.{nd}f}, {hi:.{nd}f}]"
 
 
-def verdict_table(named):
-    """named: {test: verdict-dict-or-{key: verdict-dict}}"""
+GATED = ("S2", "S3", "S4", "S6")        # results that interpret a learner; blocked while Gate 0 fails
+
+
+def verdict_table(named, gate0_passed=True):
+    """named: {test: verdict-dict-or-{key: verdict-dict}}. Learner-based tests read UNINTERPRETABLE while Gate 0 fails."""
     rows = []
     for test, v in named.items():
         items = [(None, v)] if "status" in v else list(v.items())
         for key, d in items:
-            rows.append({"test": test, "condition": "" if key is None else str(key), "claim": d["claim"], "result": BADGE[d["status"]]})
+            res = BADGE[d["status"]]
+            if d["claim"] == "C1" and d["status"] == "neutral" and d.get("beats_balanced") and not d.get("beyond_settling"):
+                res = "narrowed: pays for settling the user, no premium over settle-toward-truth"
+            if test in GATED and not gate0_passed:
+                res = f"UNINTERPRETABLE (Gate 0 failed; raw: {res})"
+            rows.append({"test": test, "condition": "" if key is None else str(key), "claim": d["claim"], "result": res})
     return pd.DataFrame(rows)
 
 
@@ -38,7 +46,8 @@ def s1_pairs(r):
     rows = []
     for (u, rw), v in r["verdict"].items():
         for k, x in v["per_k"].items():
-            rows.append({"user": u, "reward": rw, "k": k, "selective - balanced (return)": f"{x['sel_minus_bal']:.2f} [{x['ci'][0]:.2f}, {x['ci'][1]:.2f}]"})
+            rows.append({"user": u, "reward": rw, "k": k, "selective - balanced": f"{x['sel_minus_bal']:.2f} [{x['ci'][0]:.2f}, {x['ci'][1]:.2f}]",
+                         "selective - infogain": f"{x['sel_minus_ig']:.2f} [{x['ci_ig'][0]:.2f}, {x['ci_ig'][1]:.2f}]"})
     return pd.DataFrame(rows)
 
 
@@ -178,3 +187,12 @@ def plot_s6(r, user="bayes", reward="replication"):
     ax[1].set(xlabel="lambda", title="S6: harm"); ax[1].legend(fontsize=7)
     fig.tight_layout()
     return fig
+
+
+def solver_table(r):
+    """What the exact-optimal policy does (no learner): one row per reward x gamma."""
+    rows = []
+    for rw, d in r["res"].items():
+        for g, v in d.items():
+            rows.append({"reward": rw, "gamma": g, **{c: ci(v[c]) for c in ("sel_share_ev", "share_agree", "D", "CW", "ret", "dV", "dA", "rise_agree_sel")}})
+    return pd.DataFrame(rows)

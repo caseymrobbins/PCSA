@@ -18,7 +18,7 @@ from .world import make_world
 TRAIN, EVAL, GATE = 1, 2, 3
 USERS = user_variants()
 REWARDS = ("replication", "general")
-SCRIPTS = ["agree", "balanced", "selective"] + [f"{h}{k}_agree" for k in (1, 2, 3, 5) for h in ("sel", "bal")]
+SCRIPTS = ["agree", "balanced", "selective"] + [f"{h}{k}_agree" for k in (1, 2, 3, 5) for h in ("sel", "bal", "ig")]
 
 
 def ss(seed, tag):
@@ -85,7 +85,7 @@ def gate0(profile="pilot", reward="replication", gamma=0.95, seed=0, N=12, T=8, 
     disc = (env.summary()["reward_t"] * gamma ** np.arange(T)[:, None]).sum(0).mean()
     best_script = max(
         (rollout(DialogueEnv(cfg, spec, reward, 2000, ss(seed, EVAL), world=tile_world(w, 2000)), scripted(p, T), seed)["reward_t"]
-         * gamma ** np.arange(T)[:, None]).sum(0).mean() for p in SCRIPTS if "_agree" not in p or int(p.split("_")[0][-1]) < T)
+         * gamma ** np.arange(T)[:, None]).sum(0).mean() for p in SCRIPTS if not p.startswith("ig") and ("_agree" not in p or int(p.split("_")[0][-1]) < T))
     out = {"reward": reward, "gamma": gamma, "action_match": ok_a / n, "sign_match": ok_s / n, "visits": n,
            "learner_return": float(disc), "best_script_return": float(best_script), "optimum": float(opt),
            "return_ratio": float(disc / opt)}
@@ -119,6 +119,7 @@ def _s1_task(a):
 def s1(profile="pilot", cfg=EnvCfg(), n_jobs=None):
     P = PROFILES[profile]
     seeds = range(P["seeds"])
+    cfg = replace(cfg, actions=(0, 1, 2, 4))        # information-gain action enabled for the settle-toward-truth control
     tasks = [(u, r, p, s, P["eval_eps"], cfg) for u in P["users"] for r in REWARDS for p in SCRIPTS for s in seeds]
     rows = pmap(_s1_task, tasks, n_jobs)
     res = {}
@@ -133,12 +134,15 @@ def s1(profile="pilot", cfg=EnvCfg(), n_jobs=None):
             for k in (1, 2, 3, 5):
                 diff = d[f"sel{k}_agree"]["ret"] - d[f"bal{k}_agree"]["ret"]
                 m, lo, hi = boot_ci(diff)
-                per_k[k] = {"sel_minus_bal": m, "ci": (lo, hi)}
+                vs_ig = boot_ci(d[f"sel{k}_agree"]["ret"] - d[f"ig{k}_agree"]["ret"])
+                per_k[k] = {"sel_minus_bal": m, "ci": (lo, hi), "sel_minus_ig": vs_ig[0], "ci_ig": vs_ig[1:]}
                 near.append(abs(diff.mean()) <= 0.05 * abs(d[f"sel{k}_agree"]["ret"].mean()))
             best = max(d, key=lambda p: d[p]["ret"].mean())
-            status = ("supports" if all(v["ci"][0] > 0 for v in per_k.values())
-                      else "weakens" if all(near) else "neutral")
-            verdict[(u, r)] = tag({"claim": "C1", "per_k": per_k, "best": best, "best_ret": float(d[best]["ret"].mean()),
+            beats_bal = all(v["ci"][0] > 0 for v in per_k.values())
+            beyond = all(v["ci_ig"][0] > 0 for v in per_k.values())        # also beats settle-toward-truth at every k
+            status = "supports" if beats_bal and beyond else "weakens" if all(near) else "neutral"   # beats balanced only => C1 narrows
+            verdict[(u, r)] = tag({"claim": "C1", "per_k": per_k, "beyond_settling": beyond, "beats_balanced": beats_bal,
+                                   "best": best, "best_ret": float(d[best]["ret"].mean()),
                                    "cw_wrong_share_best": float(np.nanmean(d[best]["cw_wrong_share"]))}, status)
     return {"res": res, "verdict": verdict}
 
@@ -459,3 +463,70 @@ def sample_turn_log(n=20, seed=0, cfg=EnvCfg()):
     env = DialogueEnv(cfg, USERS["deference"], "general", n, ss(seed, EVAL))
     rollout(env, scripted("sel3_agree", cfg.T), seed)
     return env.turn_log(n, seed)
+
+
+# ======================================================================= exact-solver study (S2 / S3 without a learner)
+SOLVER_GAMMAS = (0.0, 0.5, 0.9, 0.95)
+
+
+def _frac(q, k, tol=1e-9):
+    """Share of the optimal action set (ties split evenly) that is action k."""
+    best = q >= q.max() - tol
+    return best[k] / best.sum()
+
+
+def _solver_task(a):
+    reward, gamma, seed, B = a
+    T = 8
+    cfg = EnvCfg(T=T, world=WorldCfg(N=12))
+    w = make_world(cfg.world, 1, np.random.default_rng(ss(seed, GATE)))
+    sol = ExactSolver(w.L[0], w.p0[0], int(w.hstar[0]), T, gamma, reward)
+    env = DialogueEnv(cfg, USERS["bayes"], reward, B, ss(seed, EVAL), world=tile_world(w, B))
+    rng = np.random.default_rng(seed)
+    env.reset()
+    done, dv, da, drise = False, [], [], []
+    while not done:
+        bits, m, yl = env.true_state()
+        a_ = np.empty(B, int)
+        for i in range(B):
+            b, mi, yi = int(bits[i]), int(m[i]), int(yl[i])
+            q = sol.Q(env.t, b, mi, yi)[:3]
+            a_[i] = rng.choice(np.flatnonzero(q >= q.max() - 1e-9))
+            if mi >= 0 and mi != yi:                         # a correction state, paired with the uncorrected twin
+                qu = sol.Q(env.t, b, yi, yi)[:3]
+                dv.append(q.max() - qu.max())
+                da.append((q[SEL] - q[BAL]) - (qu[SEL] - qu[BAL]))
+                drise.append(_frac(q, AGREE) + _frac(q, SEL) - _frac(qu, AGREE) - _frac(qu, SEL))
+        _, _, done, _ = env.step(a_)
+    s = env.summary()
+    n = lambda x: float(np.mean(x)) if len(x) else np.nan
+    return {"sel_minus_bal": float(s["share"][:, SEL].mean() - s["share"][:, BAL].mean()), "sel_share_ev": float(s["sel_share_ev"].mean()),
+            "share_agree": float(s["share"][:, AGREE].mean()), "D": float(s["D"].mean()), "CW": float(s["CW"].mean()),
+            "ret": float(s["ret"].mean()), "dV": n(dv), "dA": n(da), "rise_agree_sel": n(drise), "n_corr_states": len(dv)}
+
+
+def solver_study(profile="pilot", gammas=SOLVER_GAMMAS, rewards=("replication", "general", "task"), B=300, n_jobs=None):
+    """What the OPTIMAL policy does (exact DP, Bayes user, K=3 N=12 T=8): horizon effect and correction effect, no learner."""
+    seeds = range(PROFILES[profile]["seeds"])
+    tasks = [(r, g, s, B) for r in rewards for g in gammas for s in seeds]
+    rows = pmap(_solver_task, tasks, n_jobs)
+    res = {}
+    for t, row in zip(tasks, rows):
+        res.setdefault(t[0], {}).setdefault(t[1], []).append(row)
+    res = {r: {g: stack(v, list(v[0])) for g, v in d.items()} for r, d in res.items()}
+    lo, hi = min(gammas), max(gammas)
+    verdict = {}
+    for r in res:
+        d = res[r]
+        trend = boot_ci(d[hi]["sel_minus_bal"] - d[lo]["sel_minus_bal"])
+        eq, _ = equivalent(d[lo]["sel_minus_bal"], 0.02)
+        verdict[("horizon", r)] = tag({"claim": "C2", "trend": trend, "gamma0_equivalent": eq, "exact": True},
+                                      "supports" if trend[1] > 0 else "weakens" if trend[2] < 0.02 and eq else "neutral")
+    for r in ("replication", "general"):
+        if r in res:
+            dV, rise = boot_ci(res[r][hi]["dV"]), boot_ci(res[r][hi]["rise_agree_sel"] - res[r][lo]["rise_agree_sel"])
+            tk = boot_ci(res["task"][hi]["dV"]) if "task" in res else None
+            ok = dV[2] < 0 and rise[1] > 0 and (tk is None or tk[1] <= 0 <= tk[2])
+            verdict[("correction", r)] = tag({"claim": "C3", "dV_hi": dV, "rise_gap_hi_minus_lo": rise, "task_dV_hi": tk, "exact": True},
+                                             "supports" if ok else "weakens" if (dV[1] >= 0 or rise[2] <= 0) else "neutral")
+    return {"res": res, "verdict": verdict}

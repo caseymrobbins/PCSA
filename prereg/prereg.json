@@ -27,6 +27,13 @@
     "TabularQ uses sequential-equivalent batched updates (alpha=0.01) with 100 parallel episodes per update batch.",
     "Capacity measures use a fixed forward window of 5 turns and the regimes 'balanced' and 'agree'; the spec's 'actual policy' regime is not separately simulated.",
     "Run profiles smoke/pilot/full trade seeds and episodes for time; only 'full' uses the spec's counts.",
-    "S4 noisy verifier also perturbs the agree action's estimated change (a zero change plus noise)."
+    "S4 noisy verifier: noise is on each state's KL estimate (shared by the current state), so agree's estimated change is exactly 0 (see deviation_log 2026-10-20 #1)."
+  ],
+  "deviation_log": [
+    {"date": "2026-10-20", "id": 1, "change": "Noisy verifier rewritten: noise on the per-state KL estimate instead of on the change.", "reason": "First version added noise to agree's zero change, rejecting ~half of agree turns at any sigma; results were flat across sigma (CW 0.4-0.5%, false-reject 13-22%, 7-10% empty feasible sets) and uninformative."},
+    {"date": "2026-10-20", "id": 2, "change": "S1 adds information-gain-k-then-agree as a control; C1 is 'supports' only if selective also beats it at every k, otherwise 'narrowed'.", "reason": "The spec's C1 says 'beyond what it pays for settling the user by any means'; balanced-k alone cannot test that."},
+    {"date": "2026-10-20", "id": 3, "change": "Scorecard marks S2, S3, S4, S6 UNINTERPRETABLE while Gate 0 fails.", "reason": "Spec: no learned value is interpreted before Gate 0 passes; first full run marked them SUPPORTS regardless."},
+    {"date": "2026-10-20", "id": 4, "change": "Adds an exact-solver study (optimal policy at each gamma, correction effect via paired states) that answers C2/C3 with no learner.", "reason": "Gate 0 failed; the solver is the only source of true values on the small instance."},
+    {"date": "2026-10-20", "id": 5, "change": "Post-hoc findings from the first full run (10 seeds, commit 56909fc): (a) P2 holds under R-replication only; under R-general selective beats balanced at gamma=0 (sel share among evidence 0.98, immediate part of A 0.07); (b) DS equals D exactly for beta=1 users, steered-vs-balanced AUC 0.53-0.67 against the pre-registered 0.9 (0.79-0.93 on wrong-lean users); (c) DeferenceUser final kappa is higher, not lower, at gamma=0.95 than at 0 (0.16 vs 0.06 under R-replication); (d) S5: plain, double and linear Q prefer the low-variance family (0.87-0.94), REINFORCE 0.51.", "reason": "Recorded as observed deviations from the predictions table; none changes a threshold."}
   ]
 }

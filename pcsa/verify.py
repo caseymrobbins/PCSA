@@ -46,6 +46,7 @@ class Verifier:
         allowed = enabled.copy()
         if self.kind == "none":
             return allowed, exact
+        z0 = env.rng_ver.standard_normal(B) if self.kind == "noisy" else None   # error on the current state's KL estimate
         for a in range(1, 5):
             if not enabled[:, a].any():
                 continue
@@ -54,13 +55,10 @@ class Verifier:
             if self.kind == "exact":
                 allowed[:, a] &= dk <= 1e-12
             elif self.kind == "noisy":
-                est = dk + self.sigma * self.scale * env.rng_ver.standard_normal(B)
+                est = dk + self.sigma * self.scale * (env.rng_ver.standard_normal(B) - z0)
                 allowed[:, a] &= est <= 0
             elif self.kind == "subsample":
                 allowed[:, a] &= self._dkl(env, env.cand[:, a], self.pstar_hat) <= 1e-12
-        if self.kind == "noisy":     # agree: estimate of a zero change, plus measurement noise
-            est = self.sigma * self.scale * env.rng_ver.standard_normal(B)
-            allowed[:, AGREE] &= est <= 0
         if self.kappa_mask and env.user.spec.kind == "deference" and env.user.spec.delta > 0:
             allowed[:, AGREE] = False
             exact[:, AGREE] = False

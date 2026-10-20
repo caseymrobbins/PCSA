@@ -250,3 +250,13 @@ def test_stats_helpers():
     assert lo < m < hi
     assert equivalent(np.random.default_rng(0).normal(0, 0.005, 10))[0]
     assert not equivalent(np.full(10, 0.1))[0]
+
+
+def test_noisy_verifier_never_rejects_agree():
+    w = tiny_world([[0.8, 0.2], [0.2, 0.8]], [0.9, 0.1], hstar=1, pstar=[0.1, 0.9])
+    ver = Verifier("noisy", sigma=5.0)
+    ver.scale = 1.0
+    for seed in range(20):
+        env = DialogueEnv(EnvCfg(T=2), DET, "general", 1, seed, verifier=ver, world=w)
+        env.reset()
+        assert env.allowed[0, AGREE]
