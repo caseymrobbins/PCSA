@@ -20,6 +20,43 @@ QS = make_questions(6, 0, N=4)
 D = DialogueCfg(T=2, max_new=10, temperature=1.0)
 
 
+def _tiny_rm():
+    torch.manual_seed(0)
+    cfg = transformers.LlamaConfig(vocab_size=258, hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=2,
+                                   max_position_embeddings=8192, num_labels=1)
+    assert cfg.pad_token_id is None                                           # the failing case from the first real run
+    return transformers.LlamaForSequenceClassification(cfg).float()
+
+
+def _convs():
+    return [[{"role": "user", "content": "a" * n}, {"role": "assistant", "content": "ok"}] for n in (5, 40, 17)]
+
+
+def test_reward_model_without_a_pad_token_scores_batches_like_single_conversations():
+    from pcsa_llm.dry import ByteTok
+    from pcsa_llm.models import HFRewardModel
+
+    class NoPadTok(ByteTok):
+        pad_token, pad_token_id = None, None
+
+        def get_vocab(self):
+            return {}
+
+    rm = HFRewardModel("tiny", device="cpu", model=_tiny_rm(), tokenizer=NoPadTok())
+    assert rm.batch_size == 1                                                  # no usable pad token -> no padding
+    batched = rm.score(_convs())
+    single = [rm.score([c])[0] for c in _convs()]
+    assert batched == pytest.approx(single, abs=1e-5) and len(set(np.round(batched, 5))) == 3
+
+
+def test_reward_model_with_a_distinct_pad_token_batches_without_changing_scores():
+    from pcsa_llm.dry import ByteTok
+    from pcsa_llm.models import HFRewardModel
+    rm = HFRewardModel("tiny", device="cpu", model=_tiny_rm(), tokenizer=ByteTok())      # pad id 0, eos id 1: distinct
+    assert rm.batch_size == 8 and rm.model.config.pad_token_id == 0
+    assert rm.score(_convs()) == pytest.approx(rm.score(_convs(), batch_size=1), abs=1e-4)
+
+
 def test_hfchat_generates_text_and_records_tokens():
     chat = tiny_chat()
     texts = chat.generate([[{"role": "user", "content": "hi"}]] * 3, max_new_tokens=8, temperature=1.0, seed=0)

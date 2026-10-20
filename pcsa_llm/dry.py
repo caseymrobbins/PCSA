@@ -53,6 +53,9 @@ class ByteTok:
         out.update(input_ids=x, attention_mask=m)
         return out
 
+    def get_vocab(self):
+        return {"<pad>": 0, "<eos>": 1}
+
     def decode(self, ids, skip_special_tokens=True):
         return bytes(i - 2 for i in ids if i >= 2).decode(errors="ignore")
 

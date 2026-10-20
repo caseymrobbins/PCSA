@@ -138,23 +138,43 @@ class HFChat:
 
 
 class HFRewardModel:
-    """Sequence-classification reward model scored on the chat-formatted conversation."""
-    def __init__(self, name, dtype="bfloat16", device="cuda", quant=None):
+    """Sequence-classification reward model scored on the chat-formatted conversation.
+    Many reward-model tokenizers define no pad token, and the model then refuses batches. We give it a pad token that is distinct from
+    the end-of-turn token (reusing that one would make the model read the hidden state one position early); if none exists we score
+    one conversation at a time, which needs no padding at all."""
+    PAD_CANDIDATES = ("<|finetune_right_pad_id|>", "<pad>", "<unk>")
+
+    def __init__(self, name, dtype="bfloat16", device="cuda", quant=None, model=None, tokenizer=None):
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
         self.torch, self.device = torch, device
-        self.tok = AutoTokenizer.from_pretrained(name)
-        q = quant_config(quant, dtype)
-        if q is not None:
-            self.model = AutoModelForSequenceClassification.from_pretrained(name, quantization_config=q, dtype=getattr(torch, dtype), num_labels=1, device_map={"": 0}).eval()
+        self.tok = tokenizer or AutoTokenizer.from_pretrained(name)
+        if model is not None:
+            self.model = model.eval()
         else:
-            self.model = AutoModelForSequenceClassification.from_pretrained(name, dtype=getattr(torch, dtype), num_labels=1).to(device).eval()
+            q = quant_config(quant, dtype)
+            if q is not None:
+                self.model = AutoModelForSequenceClassification.from_pretrained(name, quantization_config=q, dtype=getattr(torch, dtype), num_labels=1, device_map={"": 0}).eval()
+            else:
+                self.model = AutoModelForSequenceClassification.from_pretrained(name, dtype=getattr(torch, dtype), num_labels=1).to(device).eval()
+        if self.tok.pad_token is None:
+            vocab = self.tok.get_vocab()
+            for cand in self.PAD_CANDIDATES:
+                if cand in vocab:
+                    self.tok.pad_token = cand
+                    break
+        usable = self.tok.pad_token is not None and self.tok.pad_token_id != self.tok.eos_token_id
+        self.batch_size = 8 if usable else 1
+        if usable:
+            self.model.config.pad_token_id = self.tok.pad_token_id
+        # otherwise batches are size 1 and pad_token_id stays None, which makes transformers score the true last token
 
-    def score(self, convs, batch_size=8):
+    def score(self, convs, batch_size=None):
         torch, out = self.torch, []
+        batch_size = batch_size or self.batch_size
         for i in range(0, len(convs), batch_size):
             texts = [self.tok.apply_chat_template(c, tokenize=False) for c in convs[i:i + batch_size]]
-            enc = self.tok(texts, return_tensors="pt", padding=True, truncation=True, max_length=4096, add_special_tokens=False).to(self.device)
+            enc = self.tok(texts, return_tensors="pt", padding=len(texts) > 1, truncation=True, max_length=4096, add_special_tokens=False).to(self.device)
             with torch.no_grad():
                 out += self.model(**enc).logits[:, 0].float().cpu().tolist()
         return out
