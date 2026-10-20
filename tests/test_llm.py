@@ -175,3 +175,27 @@ def test_l5_l6_verdicts_are_neutral_when_there_is_no_steering_to_remove():
     assert l5_verdict([_run(0.9, 3.0)], b, [_run(1.2, 3.0)])["status"] == "weakens"
     base = {"SB": 0.0, "D": 1.0}
     assert l6_verdict({0.5: [_run(1, 1.0, 0.0)], 2.0: [_run(1, 1.0, 0.0)]}, base, arm_c_D=1.0)["status"] == "neutral"
+
+
+def test_hub_preflight_distinguishes_ok_gated_with_access_gated_without_access_and_missing(monkeypatch):
+    import huggingface_hub
+    from pcsa_llm.hub import blocking, check_models
+
+    class Info:
+        def __init__(self, gated): self.gated = gated
+
+    class GatedRepoError(Exception):
+        pass
+
+    def model_info(self, i):
+        if i == "missing": raise RuntimeError("404")
+        return Info("manual" if i.startswith("gated") else False)
+
+    def download(i, f):
+        if i == "gated-no": raise GatedRepoError("401")
+        return "x"
+    monkeypatch.setattr(huggingface_hub.HfApi, "model_info", model_info)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    st = check_models(["open", "gated-yes", "gated-no", "missing"])
+    assert st["open"] == "ok" and st["gated-yes"].startswith("ok (gated") and st["gated-no"].startswith("NO ACCESS")
+    assert st["missing"].startswith("UNAVAILABLE") and set(blocking(st)) == {"gated-no", "missing"}
