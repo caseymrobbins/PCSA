@@ -185,3 +185,23 @@ def test_memory_plan_by_gpu_size():
     assert p80["name"] == "a100_80" and p80["aux_quant"] is None and p80["grad_ckpt"]
     p40 = memory_plan(40)
     assert p40["aux_quant"] == "4bit" and p40["grad_ckpt"] and p40["gen_batch"] < p80["gen_batch"]
+
+
+def test_policy_and_critic_are_clipped_separately_so_critic_error_cannot_shrink_policy_gradients(monkeypatch):
+    """Regression for the first real L3 log: one joint clip let a large critic error (reward scale ~ -8) scale down the LoRA gradients."""
+    from pcsa_llm.l_train import build_samples
+    chat = tiny_chat()
+    ppo = TurnPPO(chat, PPOCfg(arm="C", lr=1e-3, epochs=1, minibatch=2))
+    groups = []
+    real = torch.nn.utils.clip_grad_norm_
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", lambda params, m: (groups.append({id(p) for p in params}), real(params, m))[1])
+    eps = run_dialogues(chat, MockChat(bayes_user), QS[:3], D, seed=0)
+    samples = build_samples(ppo, eps, turn_rewards(eps, FakeRM()))
+    for s in samples:
+        s["ret"] = -1e4                                                       # enormous critic error
+    ppo.update(samples)
+    pol, val = {id(p) for p in ppo.policy_params}, {id(p) for p in ppo.value_params}
+    assert groups and all(g == pol or g == val for g in groups)               # never a mixture
+    assert any(g == pol for g in groups) and any(g == val for g in groups)
+    lrs = {g["lr"] for g in ppo.opt.param_groups}
+    assert lrs == {1e-3, ppo.cfg.vf_lr}

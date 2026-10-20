@@ -52,6 +52,7 @@ class PPOCfg:
     lora_r: int = 16
     lora_alpha: int = 32
     max_grad_norm: float = 1.0
+    vf_lr: float = 1e-3          # the value head is a linear map fitting rewards on the reward model's scale; it needs a larger step than LoRA
     grad_ckpt: bool = False      # recompute activations in the backward pass (needed to fit a 7B policy next to the auxiliary models on 40 GB)
 
     def __post_init__(self):
@@ -84,9 +85,12 @@ class TurnPPO:
         chat.model = self.model
         hidden = base.config.hidden_size if hasattr(base.config, "hidden_size") else base.config.n_embd
         self.value_head = torch.nn.Linear(hidden, 1).to(chat.device).float()
-        params = [p for p in self.model.parameters() if p.requires_grad] + list(self.value_head.parameters())
-        self.opt = torch.optim.AdamW(params, lr=cfg.lr)
-        self.params = params
+        # Policy and critic are optimised and clipped separately. With one joint clip, a large critic error (reward scale ~ -8 at the
+        # start) gives a gradient norm in the hundreds and shrinks the policy's gradients by that factor; the factor fades as the critic
+        # fits, so the policy's effective step size drifted upward during training (seen as KL to the reference ramping from 1e-3 to 1).
+        self.policy_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.value_params = list(self.value_head.parameters())
+        self.opt = torch.optim.AdamW([{"params": self.policy_params, "lr": cfg.lr}, {"params": self.value_params, "lr": cfg.vf_lr}])
 
     # -- forward helpers
     def _logprobs(self, p_ids, r_ids, grad):
@@ -138,7 +142,8 @@ class TurnPPO:
                     loss = (pol + cfg.kl_coef * kl + cfg.vf_coef * vloss) / len(batch)
                     loss.backward()
                     diag["loss"].append(float(pol.detach())); diag["kl"].append(float(kl.detach())); diag["vloss"].append(float(vloss.detach()))
-                torch.nn.utils.clip_grad_norm_(self.params, cfg.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(self.policy_params, cfg.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(self.value_params, cfg.max_grad_norm)
                 self.opt.step()
         self.model.eval()
         return {k: float(np.mean(v)) for k, v in diag.items()}
