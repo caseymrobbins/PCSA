@@ -5,11 +5,14 @@ from .models import CachedRM, MockChat
 
 
 def memory_plan(total_gb):
-    """Rule of thumb from GPU memory. >= 70 GB (G4 96 GB, A100 80 GB): everything bf16. Below (A100 40 GB): the auxiliary models
-    (user, reward models, judge) are 4-bit, the policy trains with gradient checkpointing, and generation batches are small
-    (a 7B model with full attention keeps ~0.5 MB of KV cache per token)."""
-    if total_gb >= 70:
+    """Rule of thumb from GPU memory (a 7B model with full attention keeps ~0.5 MB of KV cache per token).
+    >= 90 GB (G4 96 GB): everything bf16, no checkpointing.
+    60-90 GB (A100 80 GB): everything bf16 (~46 GB of weights), but the policy trains with gradient checkpointing and generates in smaller batches.
+    < 60 GB (A100 40 GB): the auxiliary models (user, reward models, judge) are 4-bit as well."""
+    if total_gb >= 90:
         return {"name": "large", "aux_quant": None, "grad_ckpt": False, "gen_batch": 16, "minibatch": 4}
+    if total_gb >= 60:
+        return {"name": "a100_80", "aux_quant": None, "grad_ckpt": True, "gen_batch": 8, "minibatch": 2}
     return {"name": "a100_40", "aux_quant": "4bit", "grad_ckpt": True, "gen_batch": 4, "minibatch": 2}
 
 

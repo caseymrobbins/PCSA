@@ -143,6 +143,8 @@ def test_gradient_checkpointing_gives_the_same_update_as_without():
 
 def test_memory_plan_by_gpu_size():
     from pcsa_llm.loaders import memory_plan
-    assert memory_plan(96)["aux_quant"] is None and memory_plan(80)["aux_quant"] is None
-    p = memory_plan(40)
-    assert p["aux_quant"] == "4bit" and p["grad_ckpt"] and p["gen_batch"] < 16
+    assert memory_plan(96)["name"] == "large" and not memory_plan(96)["grad_ckpt"]
+    p80 = memory_plan(79.6)                                                   # what an 80 GB A100 reports
+    assert p80["name"] == "a100_80" and p80["aux_quant"] is None and p80["grad_ckpt"]
+    p40 = memory_plan(40)
+    assert p40["aux_quant"] == "4bit" and p40["grad_ckpt"] and p40["gen_batch"] < p80["gen_batch"]
