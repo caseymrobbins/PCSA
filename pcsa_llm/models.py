@@ -62,17 +62,39 @@ def format_base(conv):
     return "".join(parts)
 
 
+def quant_config(quant, dtype="bfloat16"):
+    """quant: None | '4bit' | '8bit'. 4-bit NF4 with bf16 compute (needs bitsandbytes and a CUDA GPU)."""
+    if not quant:
+        return None
+    import torch
+    from transformers import BitsAndBytesConfig
+    if quant == "4bit":
+        return BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=getattr(torch, dtype), bnb_4bit_use_double_quant=True)
+    if quant == "8bit":
+        return BitsAndBytesConfig(load_in_8bit=True)
+    raise ValueError(quant)
+
+
+def load_causal_lm(name, dtype, device, quant=None):
+    import torch
+    from transformers import AutoModelForCausalLM
+    q = quant_config(quant, dtype)
+    if q is not None:
+        return AutoModelForCausalLM.from_pretrained(name, quantization_config=q, dtype=getattr(torch, dtype), device_map={"": 0})
+    return AutoModelForCausalLM.from_pretrained(name, dtype=getattr(torch, dtype)).to(device)
+
+
 class HFChat:
     """Batched generation with a Hugging Face causal LM. `base=True` uses the few-shot template for base checkpoints."""
-    def __init__(self, name, dtype="bfloat16", device="cuda", base=False, model=None, tokenizer=None):
+    def __init__(self, name, dtype="bfloat16", device="cuda", base=False, model=None, tokenizer=None, quant=None, batch_size=16):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        self.torch, self.base, self.device = torch, base, device
+        self.torch, self.base, self.device, self.batch_size = torch, base, device, batch_size
         self.tok = tokenizer or AutoTokenizer.from_pretrained(name)
         self.tok.padding_side = "left"
         if self.tok.pad_token is None:
             self.tok.pad_token = self.tok.eos_token
-        self.model = model or AutoModelForCausalLM.from_pretrained(name, dtype=getattr(torch, dtype)).to(device)
+        self.model = model or load_causal_lm(name, dtype, device, quant)
         self.model.eval()
 
     def format(self, conv):
@@ -86,8 +108,9 @@ class HFChat:
         r = self.tok(text, add_special_tokens=False)["input_ids"]
         return list(p), list(r)
 
-    def generate(self, convs, max_new_tokens=256, temperature=0.7, seed=None, batch_size=16, return_tokens=False):
+    def generate(self, convs, max_new_tokens=256, temperature=0.7, seed=None, batch_size=None, return_tokens=False):
         torch = self.torch
+        batch_size = batch_size or self.batch_size
         if seed is not None:
             torch.manual_seed(seed)
         texts, p_ids, r_ids = [], [], []
@@ -116,12 +139,16 @@ class HFChat:
 
 class HFRewardModel:
     """Sequence-classification reward model scored on the chat-formatted conversation."""
-    def __init__(self, name, dtype="bfloat16", device="cuda"):
+    def __init__(self, name, dtype="bfloat16", device="cuda", quant=None):
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
         self.torch, self.device = torch, device
         self.tok = AutoTokenizer.from_pretrained(name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(name, dtype=getattr(torch, dtype), num_labels=1).to(device).eval()
+        q = quant_config(quant, dtype)
+        if q is not None:
+            self.model = AutoModelForSequenceClassification.from_pretrained(name, quantization_config=q, dtype=getattr(torch, dtype), num_labels=1, device_map={"": 0}).eval()
+        else:
+            self.model = AutoModelForSequenceClassification.from_pretrained(name, dtype=getattr(torch, dtype), num_labels=1).to(device).eval()
 
     def score(self, convs, batch_size=8):
         torch, out = self.torch, []

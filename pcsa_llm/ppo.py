@@ -52,6 +52,7 @@ class PPOCfg:
     lora_r: int = 16
     lora_alpha: int = 32
     max_grad_norm: float = 1.0
+    grad_ckpt: bool = False      # recompute activations in the backward pass (needed to fit a 7B policy next to the auxiliary models on 40 GB)
 
     def __post_init__(self):
         if self.gamma is None:
@@ -75,6 +76,9 @@ class TurnPPO:
         from peft import LoraConfig, get_peft_model
         self.torch, self.cfg, self.chat = torch, cfg, chat
         base = chat.model
+        if cfg.grad_ckpt:
+            base.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            base.enable_input_require_grads()
         self.model = get_peft_model(base, LoraConfig(r=cfg.lora_r, lora_alpha=cfg.lora_alpha, target_modules="all-linear",
                                                      lora_dropout=0.0, task_type="CAUSAL_LM"))
         chat.model = self.model
@@ -113,6 +117,8 @@ class TurnPPO:
             with self.model.disable_adapter():
                 s["logp_ref"], _ = self._logprobs(s["p_ids"], s["r_ids"], grad=False)
         diag = {"loss": [], "kl": [], "vloss": []}
+        if cfg.grad_ckpt:
+            self.model.train()                                   # HF only checkpoints in train mode; LoRA dropout is 0, so no other effect
         for _ in range(cfg.epochs):
             order = np.random.permutation(len(samples))
             for i in range(0, len(order), cfg.minibatch):
@@ -134,6 +140,7 @@ class TurnPPO:
                     diag["loss"].append(float(pol.detach())); diag["kl"].append(float(kl.detach())); diag["vloss"].append(float(vloss.detach()))
                 torch.nn.utils.clip_grad_norm_(self.params, cfg.max_grad_norm)
                 self.opt.step()
+        self.model.eval()
         return {k: float(np.mean(v)) for k, v in diag.items()}
 
     def values(self, samples):

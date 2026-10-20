@@ -12,7 +12,7 @@ Project repository for PCSA.
 `notebooks/pcsa_experiments.ipynb` runs the simulation suite from the test spec (Gate 0, exact-solver study, S1–S7) in Colab (CPU).
 Set `PROFILE` (`smoke` → `pilot` → `full`) and run all cells; it prints a SUPPORTS / WEAKENS / neutral scorecard per claim.
 
-`notebooks/pcsa_llm_g4.ipynb` runs the LLM suite (L0–L6) on a Colab G4. Run it once with `DRY_RUN = True` (tiny random model, mocks, CPU, ~2 min) to check the plumbing, then set it to `False` and start with `PROFILE = "quick"`. Model ids are unverified defaults; the notebook checks them against the Hub first.
+`notebooks/pcsa_llm_gpu.ipynb` runs the LLM suite (L0–L6) on a Colab GPU (A100 40/80 GB or G4; the memory plan is chosen automatically). Run it once with `DRY_RUN = True` (tiny random model, mocks, CPU, ~2 min) to check the plumbing, then set it to `False` and start with `PROFILE = "quick"`. Model ids are unverified defaults; the notebook checks them against the Hub first.
 
 ```
 pip install -e . pytest      # numpy is the only runtime dependency (pandas + matplotlib for the notebook)

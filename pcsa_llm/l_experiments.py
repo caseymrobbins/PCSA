@@ -39,10 +39,14 @@ def l1_reward_incentive(rms, questions, T=8, ks=(1, 2, 3, 5), seed=0):
         first = scores[("agree", None)][:, 0]
         res["agree_after_correction_minus_turn1"] = boot_ci(after - first)
         out["per_rm"][name] = res
-    ok = [n for n, r in out["per_rm"].items() if all(v[1] > 0 for v in r["k"].values())]
-    out["verdict"] = {"claim": "C1", "status": "supports" if ok else "weakens" if all(v[2] <= 0 for r in out["per_rm"].values() for v in r["k"].values()) else "neutral",
-                      "reward_models_with_selective_advantage": ok}
+    out["verdict"] = l1_verdict(out["per_rm"])
     return out
+
+
+def l1_verdict(per_rm):
+    ok = [n for n, r in per_rm.items() if all(v[1] > 0 for v in r["k"].values())]
+    return {"claim": "C1", "status": "supports" if ok else "weakens" if all(v[2] <= 0 for r in per_rm.values() for v in r["k"].values()) else "neutral",
+            "reward_models_with_selective_advantage": ok}
 
 
 # ---- L2 ----------------------------------------------------------------------------------------

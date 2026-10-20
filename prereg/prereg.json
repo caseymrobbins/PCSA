@@ -110,6 +110,12 @@
       "id": 9,
       "change": "Hugging Face model ids in the notebook config are defaults that were not verified (no Hub access from the build sandbox); the notebook checks them before loading. Real-data dossiers (secondary set) are not implemented.",
       "reason": "Spec lists model/RM selection as open decisions."
+    },
+    {
+      "date": "2026-10-20",
+      "id": 10,
+      "change": "On GPUs under 70 GB (A100 40 GB) the user, judge and reward models load in 4-bit NF4 and the policy trains with gradient checkpointing; reward models are loaded one at a time in L1.",
+      "reason": "The spec's compute decision changed from a 96 GB G4 to an A100; 7B policy + 7B user + 8B reward model do not fit in bf16 on 40 GB. The L0 gate validates the quantized user; reward scores are compared only within a run. Untested on a GPU."
     }
   ],
   "llm_thresholds": {

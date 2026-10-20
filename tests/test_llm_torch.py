@@ -123,3 +123,26 @@ def test_activations_and_steering_hook_change_generation_inputs():
         steered = collect_activations(chat, [conv], layer=2)
     after = collect_activations(chat, [conv], layer=2)
     assert not np.allclose(base, steered) and np.allclose(base, after)       # hook removed on exit
+
+
+def test_gradient_checkpointing_gives_the_same_update_as_without():
+    from pcsa_llm.l_train import build_samples
+    outs = []
+    for ckpt in (False, True):
+        chat = tiny_chat()
+        ppo = TurnPPO(chat, PPOCfg(arm="C", lr=1e-2, epochs=1, minibatch=2, grad_ckpt=ckpt))
+        torch.manual_seed(0); np.random.seed(0)
+        eps = run_dialogues(chat, MockChat(bayes_user), QS[:3], D, seed=0)
+        samples = build_samples(ppo, eps, turn_rewards(eps, FakeRM()))
+        diag = ppo.update(samples)
+        outs.append((diag, torch.cat([p.detach().flatten() for n, p in ppo.model.named_parameters() if "lora" in n])))
+        assert not ppo.model.training                                          # back in eval mode afterwards
+    assert outs[0][0]["loss"] == pytest.approx(outs[1][0]["loss"], rel=1e-4, abs=1e-6)
+    assert torch.allclose(outs[0][1], outs[1][1], atol=1e-5)
+
+
+def test_memory_plan_by_gpu_size():
+    from pcsa_llm.loaders import memory_plan
+    assert memory_plan(96)["aux_quant"] is None and memory_plan(80)["aux_quant"] is None
+    p = memory_plan(40)
+    assert p["aux_quant"] == "4bit" and p["grad_ckpt"] and p["gen_batch"] < 16

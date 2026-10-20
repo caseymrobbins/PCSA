@@ -38,7 +38,7 @@ def run_arm(loaders, arm, seed, rm, user, train_q, eval_q, dcfg, iters, per_iter
             judge=None, lam=0.0, save_dir=None, tag=None, log=print):
     """Train one arm (A single-turn, B gamma = 0, C gamma = 0.95) and evaluate it on held-out questions with the full horizon."""
     chat = loaders.policy(loaders.cfg["l3_policy"], seed=seed)
-    ppo = TurnPPO(chat, PPOCfg(arm=arm, lr=loaders.cfg.get("lr", 1e-5)))
+    ppo = TurnPPO(chat, PPOCfg(arm=arm, lr=loaders.cfg.get("lr", 1e-5), grad_ckpt=loaders.plan["grad_ckpt"], minibatch=loaders.plan["minibatch"]))
     tcfg = DialogueCfg(T=1 if arm == "A" else dcfg.T, max_new=dcfg.max_new, temperature=dcfg.temperature, user_retries=dcfg.user_retries)
     hist = train(ppo, user, rm, train_q, tcfg, iters, per_iter, seed=seed, step_fn_factory=step_fn_factory, judge=judge, lam=lam, log=log)
     sums, eps = evaluate(chat, user, eval_q, dcfg, eval_seeds)
