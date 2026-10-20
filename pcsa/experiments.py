@@ -202,8 +202,7 @@ def s2(profile="pilot", cfg=EnvCfg(), gammas=S2_GAMMAS, n_jobs=None):
     res = {}
     for t, row in zip(tasks, rows):
         res.setdefault(t[0], {}).setdefault(t[1], {}).setdefault(t[2], []).append(row)
-    keys = [k for k in rows[0] if k not in ("Q",)]
-    res = {u: {r: {g: stack(v, keys) for g, v in d.items()} for r, d in ur.items()} for u, ur in res.items()}
+    res = {u: {r: {g: stack(v, [k for k in v[0] if k != "Q"]) for g, v in d.items()} for r, d in ur.items()} for u, ur in res.items()}
     verdict = {}
     for u in res:
         for r in res[u]:
