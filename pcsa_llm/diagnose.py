@@ -162,7 +162,8 @@ def diagnose_l0(g):
     mode = f" [prompt style '{g.get('style', 'base')}', view '{g.get('view', 'full')}']"
     add("ok" if g["pass"] else "fail", "Spec gate: user follows Bayes on evidence" + mode,
         f"Spearman {g['spearman']:.2f} (need >= 0.80); {g['direction']:.0%} of shown items move the probability the right way (need >= 90%); "
-        f"{g['dropped_dialogues']} of {g.get('n_dialogues', '?')} dialogue(s) dropped for invalid JSON. Why replies were invalid: {_reasons(g.get('invalid_reasons'))}.",
+        f"{g['dropped_dialogues']} of {g.get('n_dialogues', '?')} dialogue(s) dropped for unusable replies. Why: {_reasons(g.get('invalid_reasons'))}. "
+        f"Replies repaired without changing probability ratios: {_reasons(g.get('repairs'))}.",
         "" if g["pass"] else "Run the L0 lab cell: it compares prompt styles ('worked' adds the update procedure) and views side by side. Invalid replies are usually a "
                              "probability sum off by more than 0.05 or extra text around the JSON; the reasons above say which.")
     a = g.get("assertion", {})

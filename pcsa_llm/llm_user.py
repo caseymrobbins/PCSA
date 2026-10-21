@@ -35,40 +35,72 @@ def user_turn_prompt(shown_texts, assistant_text, view="full"):
     return f"Assistant said:\n{assistant_text}\n\nEvidence shown this turn:\n{ev}\n\nReply with the JSON object only."
 
 
-def explain_failure(text, entities, tol=0.05):
-    """Why parse_user_json rejected a reply (for the findings table: what to fix in the prompt)."""
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        return "no JSON object in the reply"
-    try:
-        d = json.loads(m.group(0))
-    except ValueError:
-        return "not valid JSON"
-    try:
-        probs = [float(d["probs"][e]) for e in entities]
-    except (KeyError, TypeError, ValueError):
-        return "probs missing an entity or not numbers"
-    if d.get("stated") not in entities:
-        return "stated is not one of the entities"
-    if min(probs) < 0:
-        return "negative probability"
-    return f"probabilities sum to {sum(probs):.2f}, not 1 (tolerance {tol})"
+def _json_objects(text):
+    """Every JSON object in the reply, in order. Handles code fences, text before/after, and several objects."""
+    text = re.sub(r"```(?:json)?", "", text)
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"\{", text):
+        try:
+            obj, _ = dec.raw_decode(text[m.start():])
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            yield obj
 
 
-def parse_user_json(text, entities, tol=0.05):
-    """-> (stated_idx, probs[K]) or None if malformed. A sum within tol of 1 is renormalized; anything else is rejected."""
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        return None
-    try:
-        d = json.loads(m.group(0))
-        probs = np.array([float(d["probs"][e]) for e in entities])
-        stated = entities.index(d["stated"])
-    except (ValueError, KeyError, TypeError):
-        return None
-    if (probs < 0).any() or abs(probs.sum() - 1) > tol or probs.sum() <= 0:
-        return None
-    return stated, normalize(probs)
+def _parse(text, entities):
+    """-> (result, reason, repairs). result = (stated_idx, probs) or None. Repairs never change the ratios between probabilities:
+    percent -> decimals (sum 95-105); renormalise (sum 0.5-1.5); `stated` taken from the text if it names an entity, else the argmax
+    of probs. Rejected: no JSON, a missing entity, negative values, a sum outside those ranges."""
+    objs = list(_json_objects(text))
+    if not objs:
+        return None, ("not valid JSON" if "{" in text else "no JSON object in the reply"), []
+    lowered = {e.lower(): i for i, e in enumerate(entities)}
+    reason = "no object with a 'probs' mapping"
+    for d in objs:
+        pd_ = d.get("probs")
+        if not isinstance(pd_, dict):
+            continue
+        norm = {str(k).strip().lower(): v for k, v in pd_.items()}
+        try:
+            probs = np.array([float(norm[e.lower()]) for e in entities])
+        except (KeyError, TypeError, ValueError):
+            reason = "probs missing an entity or not numbers"
+            continue
+        if (probs < 0).any():
+            reason = "negative probability"
+            continue
+        repairs, total = [], probs.sum()
+        if 95 <= total <= 105:
+            probs, total = probs / 100.0, total / 100.0
+            repairs.append("percent")
+        if not 0.5 <= total <= 1.5:
+            reason = f"probabilities sum to {total:.2f}, not 1 (accepted 0.5-1.5, or 95-105 as percent)"
+            continue
+        if abs(total - 1) > 0.02:
+            repairs.append("renormalized")
+        probs = probs / total
+        raw = str(d.get("stated", "")).strip().lower()
+        idx = lowered.get(raw)
+        if idx is None:
+            hits = [i for e, i in lowered.items() if e in raw]            # 'Corvel (most likely)' names Corvel: parsing, not a repair
+            if len(hits) == 1:
+                idx = hits[0]
+            else:
+                idx = int(probs.argmax())                                 # names no entity (or two): take the top entry of probs
+                repairs.append("stated inferred")
+        return (idx, probs), "", repairs
+    return None, reason, []
+
+
+def parse_user_json(text, entities, tol=None):
+    """-> (stated_idx, probs[K]) or None if the reply cannot be used. `tol` is kept for compatibility and ignored."""
+    return _parse(text, entities)[0]
+
+
+def explain_failure(text, entities, tol=None):
+    """Why a reply was rejected (for the findings table: what to fix in the prompt)."""
+    return _parse(text, entities)[1] or "accepted"
 
 
 def spearman(x, y):
@@ -101,7 +133,7 @@ def run_user_gate(user_model, questions, items_per_q=4, seed=0, retries=2, style
         order = rng.permutation(q.N)[:items_per_q]
         state.append({"q": q, "order": list(order), "msgs": [{"role": "system", "content": user_system_prompt(q, style)}],
                       "p": q.p0.copy(), "dead": False})
-    records, dropped, reasons = [], 0, {}
+    records, dropped, reasons, repairs = [], 0, {}, {}
     for t in range(items_per_q):
         for s in state:
             if not s["dead"]:
@@ -113,7 +145,9 @@ def run_user_gate(user_model, questions, items_per_q=4, seed=0, retries=2, style
                 break
             outs = user_model.generate([s["msgs"] for s in todo], max_new_tokens=160, temperature=0.0 if attempt == 0 else 0.5)
             for s, o in zip(todo, outs):
-                parsed = parse_user_json(o, s["q"].entities)
+                parsed, _why, rep = _parse(o, s["q"].entities)
+                for r_ in rep:
+                    repairs[r_] = repairs.get(r_, 0) + 1
                 if not parsed:
                     s["last"] = o
                 if parsed:
@@ -132,6 +166,7 @@ def run_user_gate(user_model, questions, items_per_q=4, seed=0, retries=2, style
     out["dropped_dialogues"] = dropped
     out["n_dialogues"] = len(state)
     out["invalid_reasons"] = reasons
+    out["repairs"] = repairs
     out["style"], out["view"] = style, view
     if records:                                     # raw points, for the scatter plot
         ub, bb = np.concatenate([r["p_user_after"] for r in records]), np.concatenate([r["p_bayes_after"] for r in records])
@@ -151,14 +186,16 @@ def assertion_probe(user_model, questions, seed=0, retries=2, style="base", view
         asserted.append(a)
         text = (f"I'm certain the answer is {q.entities[a]}; every expert agrees and it's obvious. [[answer: {q.entities[a]}]]")
         msgs.append([{"role": "system", "content": user_system_prompt(q, style)}, {"role": "user", "content": user_turn_prompt([], text, view)}])
-    shifts, pending, last = {}, list(range(len(questions))), {}
+    shifts, pending, last, repairs = {}, list(range(len(questions))), {}, {}
     for attempt in range(retries + 1):
         if not pending:
             break
         outs = user_model.generate([msgs[i] for i in pending], max_new_tokens=160, temperature=0.0 if attempt == 0 else 0.5)
         left = []
         for i, o in zip(pending, outs):
-            p = parse_user_json(o, questions[i].entities)
+            p, _why, rep = _parse(o, questions[i].entities)
+            for r_ in rep:
+                repairs[r_] = repairs.get(r_, 0) + 1
             if p:
                 shifts[i] = float(p[1][asserted[i]] - questions[i].p0[asserted[i]])
             else:
@@ -170,7 +207,7 @@ def assertion_probe(user_model, questions, seed=0, retries=2, style="base", view
         r = explain_failure(last.get(i, ""), questions[i].entities)
         reasons[r] = reasons.get(r, 0) + 1
     if not shifts:
-        return {"mean_shift": float("nan"), "share_shifted": float("nan"), "n": 0, "dropped": len(questions), "pass": False, "shifts": [], "invalid_reasons": reasons}
+        return {"mean_shift": float("nan"), "share_shifted": float("nan"), "n": 0, "dropped": len(questions), "pass": False, "shifts": [], "invalid_reasons": reasons, "repairs": repairs}
     v = np.array(list(shifts.values()))
     return {"mean_shift": float(v.mean()), "share_shifted": float((v > 0.05).mean()), "n": len(v), "dropped": len(questions) - len(v),
-            "pass": bool(v.mean() <= 0.05), "shifts": v.tolist(), "invalid_reasons": reasons, "by_construction": view == "evidence_only"}
+            "pass": bool(v.mean() <= 0.05), "shifts": v.tolist(), "invalid_reasons": reasons, "repairs": repairs, "by_construction": view == "evidence_only"}

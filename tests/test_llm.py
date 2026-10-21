@@ -66,10 +66,36 @@ def test_user_json_validation():
     e = ["A", "B", "C"]
     ok = '{"stated": "B", "probs": {"A": 0.2, "B": 0.6, "C": 0.2}}'
     assert parse_user_json("noise " + ok + " noise", e)[0] == 1
-    assert parse_user_json('{"stated": "B", "probs": {"A": 0.2, "B": 0.62, "C": 0.2}}', e) is not None       # within tolerance, renormalized
-    for bad in ['{"stated": "Z", "probs": {"A": 0.2, "B": 0.6, "C": 0.2}}', '{"stated": "A", "probs": {"A": 0.5, "B": 0.6, "C": 0.2}}',
-                '{"stated": "A", "probs": {"A": 1}}', "not json", '{"stated": "A", "probs": {"A": -0.1, "B": 0.6, "C": 0.5}}']:
-        assert parse_user_json(bad, e) is None
+    assert parse_user_json('{"stated": "B", "probs": {"A": 0.2, "B": 0.62, "C": 0.2}}', e) is not None       # near 1: renormalized
+    # rejected: a missing entity, negative values, no JSON, or a sum far from both 1 and 100
+    for bad in ['{"stated": "A", "probs": {"A": 1}}', "not json", '{"stated": "A", "probs": {"A": -0.1, "B": 0.6, "C": 0.5}}',
+                '{"stated": "A", "probs": {"A": 1.0, "B": 1.0, "C": 0.6}}', '{"stated": "A", "probs": {"A": 0.1, "B": 0.1, "C": 0.1}}']:
+        assert parse_user_json(bad, e) is None, bad
+
+
+def test_replies_are_repaired_without_changing_probability_ratios():
+    from pcsa_llm.llm_user import _parse
+    e = ["Aldern", "Brask", "Corvel"]
+    pct, _, rep = _parse('{"stated": "Brask", "probs": {"Aldern": 20, "Brask": 60, "Corvel": 20}}', e)
+    assert np.allclose(pct[1], [0.2, 0.6, 0.2]) and rep == ["percent"]                                         # percent -> decimals
+    low, _, rep = _parse('{"stated": "Brask", "probs": {"Aldern": 0.12, "Brask": 0.36, "Corvel": 0.12}}', e)
+    assert np.allclose(low[1], [0.2, 0.6, 0.2]) and "renormalized" in rep                                       # skipped the divide-by-total step
+    inferred, _, rep = _parse('{"stated": "none yet", "probs": {"Aldern": 0.1, "Brask": 0.7, "Corvel": 0.2}}', e)
+    assert inferred[0] == 1 and rep == ["stated inferred"]                                                      # stated = argmax when it names no entity
+    named, _, rep = _parse('{"stated": "Corvel (most likely)", "probs": {"Aldern": 0.5, "Brask": 0.3, "Corvel": 0.2}}', e)
+    assert named[0] == 2 and rep == []                                                                          # a named entity in the text wins
+    keys, _, _ = _parse('{"stated": "brask", "probs": {"ALDERN": 0.2, " brask": 0.6, "corvel": 0.2}}', e)
+    assert keys[0] == 1 and np.allclose(keys[1], [0.2, 0.6, 0.2])                                               # case/space-insensitive keys
+    assert _parse("x", e)[0] is None
+    # code fences, text around, several objects: the first usable one is read
+    fenced = '```json\n{"stated": "Brask", "probs": {"Aldern": 0.2, "Brask": 0.6, "Corvel": 0.2}}\n```\nHope that helps! {not json}'
+    assert _parse(fenced, e)[0][0] == 1
+    two = '{"note": "thinking"} then {"stated": "Brask", "probs": {"Aldern": 0.2, "Brask": 0.6, "Corvel": 0.2}}'
+    assert _parse(two, e)[0][0] == 1
+    # never repaired: ratios would have to be guessed
+    for bad in ('{"stated": "A", "probs": {"Aldern": 0.2, "Brask": 0.6}}', '{"stated": "A", "probs": {"Aldern": -1, "Brask": 2, "Corvel": 0}}',
+                '{"stated": "A", "probs": {"Aldern": 3, "Brask": 3, "Corvel": 3}}'):
+        assert _parse(bad, e)[0] is None
 
 
 def test_user_gate_passes_for_a_bayesian_mock_and_fails_for_a_contrarian():
@@ -369,10 +395,22 @@ def test_invalid_replies_are_explained_so_the_prompt_can_be_fixed():
     from pcsa_llm.llm_user import explain_failure, run_user_gate
     e = ["A", "B", "C"]
     assert "no JSON" in explain_failure("sorry", e) and "not valid JSON" in explain_failure("{oops}", e)
-    assert "sum to 1.30" in explain_failure('{"stated": "A", "probs": {"A": 0.6, "B": 0.4, "C": 0.3}}', e)
-    assert "not one of the entities" in explain_failure('{"stated": "Z", "probs": {"A": 0.5, "B": 0.3, "C": 0.2}}', e)
-    g = run_user_gate(MockChat(lambda c: '{"stated": "%s", "probs": {%s}}' % (QS[0].entities[0], ", ".join(f'"{x}": 0.5' for x in QS[0].entities))), QS[:3], items_per_q=2)
-    assert g["dropped_dialogues"] == 3 and any("sum to 1.50" in k for k in g["invalid_reasons"]) and g["n_dialogues"] == 3
+    assert "sum to 2.00" in explain_failure('{"stated": "A", "probs": {"A": 0.9, "B": 0.6, "C": 0.5}}', e)
+    assert "missing an entity" in explain_failure('{"stated": "A", "probs": {"A": 0.5}}', e)
+    assert "negative" in explain_failure('{"stated": "A", "probs": {"A": -0.5, "B": 0.9, "C": 0.6}}', e)
+    assert explain_failure('{"stated": "A", "probs": {"A": 0.5, "B": 0.3, "C": 0.2}}', e) == "accepted"
+    g = run_user_gate(MockChat(lambda c: '{"stated": "%s", "probs": {%s}}' % (QS[0].entities[0], ", ".join(f'"{x}": 0.6' for x in QS[0].entities))), QS[:3], items_per_q=2)
+    assert g["dropped_dialogues"] == 3 and any("sum to 1.80" in k for k in g["invalid_reasons"]) and g["n_dialogues"] == 3
+
+
+def test_gate_counts_the_repairs_it_made():
+    from pcsa_llm.llm_user import run_user_gate
+    def pct_user(conv):                                           # a Bayesian user that answers in percent
+        out = json.loads(bayes_user(conv))
+        return json.dumps({"stated": "no idea", "probs": {k: 100 * v for k, v in out["probs"].items()}})
+    g = run_user_gate(MockChat(pct_user), QS, items_per_q=3)
+    assert g["pass"] and g["dropped_dialogues"] == 0                                       # the percent replies are usable
+    assert g["repairs"].get("percent", 0) > 0 and g["repairs"].get("stated inferred", 0) > 0
 
 
 def test_l0_lab_runs_every_variant_and_the_figure_builds(tmp_path):

@@ -134,6 +134,12 @@
       "id": 13,
       "change": "Training diagnosis compares the learned per-turn reward with the best scripted dialogue under the same reward model and warns when it is more than 2 score spreads above it.",
       "reason": "In the old arm B logs the summed reward reached about +75 per dialogue while the best scripted dialogue scored about -38.7 under the same reward model: a signature of exploiting the reward model, not of learning the intended behaviour."
+    },
+    {
+      "date": "2026-10-21",
+      "id": 14,
+      "change": "The LLM user's JSON is parsed tolerantly: percent replies (sum 95-105) are converted to decimals; sums 0.5-1.5 are renormalised; `stated` is read from the text if it names an entity, else taken as the argmax of the probabilities; keys are matched case-insensitively; the first usable JSON object in the reply is read (code fences, surrounding text). Unchanged: replies with a missing entity, negative values, or any other sum are rejected and the dialogue is logged and dropped. Every repair is counted and shown in the L0 findings.",
+      "reason": "The first real L0 lab (Qwen2.5-7B) dropped up to 21 of 30 probe replies because the model answered in percent (sum 100) and 26 of 30 because `stated` held something other than an entity name; none of these changes the ratios between probabilities, which are what is measured. Applies equally to every part of the run."
     }
   ],
   "llm_thresholds": {
