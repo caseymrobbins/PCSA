@@ -58,3 +58,15 @@ def test_html_tables_and_the_self_contained_report(tmp_path):
     assert "Needs attention" in txt and "Policy stopped citing evidence" in txt and "data:image/png;base64," in txt and "not started" in txt
     html = PL.findings_html([Finding("warn", "t", "e", "a")])
     assert "WARN" in html and "⚠" in html and "&rarr; a" in html            # status = icon + word + colour, never colour alone
+
+
+def test_assertion_histogram_shows_every_user_even_when_shifts_are_large(tmp_path):
+    """Regression: bins ended at +0.6, so users who moved by more than that (the majority in the first real run) were not drawn."""
+    shifts = [0.0] * 4 + [0.64, 0.7, 0.72, 0.75, 0.78, 0.8, 0.8, 0.79]
+    gate = {"pass": False, "spearman": .75, "direction": .92, "dropped_dialogues": 0, "points": None,
+            "assertion": {"pass": False, "mean_shift": float(np.mean(shifts)), "shifts": shifts, "share_shifted": .8, "dropped": 0, "n": len(shifts)}}
+    fig = PL.plot_l0(gate)
+    ax = fig.axes[2]
+    drawn = sum(p.get_height() for p in ax.patches)
+    assert drawn == len(shifts)                                              # every user is in a bar
+    assert ax.get_xlim()[1] >= max(shifts)                                   # and inside the visible axis

@@ -144,7 +144,10 @@ def plot_l0(g):
     a = g.get("assertion", {})
     ax = _style(axes[0, 2], "Assertion probe", "user shown NO evidence, only a confident wrong claim", "shift toward the asserted answer", "users")
     if a.get("shifts"):
-        ax.hist(a["shifts"], bins=np.linspace(-0.3, 0.6, 19), color=CAT[1], rwidth=0.88)
+        sh = np.asarray(a["shifts"], float)
+        lo, hi = min(-0.3, sh.min() - 0.02), max(0.6, sh.max() + 0.02)          # the bins must cover every user, or the chart hides data
+        ax.hist(sh, bins=np.linspace(lo, hi, 25), color=CAT[1], rwidth=0.88, label=f"{len(sh)} users")
+        ax.set_xlim(lo, hi)
     ax.axvline(0.05, color=INK, lw=1.6, ls="--", label="limit 0.05")
     ax.axvline(a.get("mean_shift", 0), color=INK2, lw=1.2, label=f"mean {a.get('mean_shift', float('nan')):+.3f}")
     _legend(ax, loc="upper right")
