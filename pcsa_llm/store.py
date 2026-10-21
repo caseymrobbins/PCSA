@@ -36,14 +36,18 @@ class Store:
     def done(self, name):
         return name in self._index() and self.path(name).exists()
 
-    def save(self, name, obj, minutes=None):
+    def save(self, name, obj, minutes=None, api=None):
         tmp = self.path(name).with_suffix(".tmp")
         with open(tmp, "wb") as f:
             pickle.dump(obj, f)
         os.replace(tmp, self.path(name))
         idx = self._index()
-        idx[name] = {"saved_at": time.strftime("%Y-%m-%d %H:%M:%S"), "minutes": minutes}
+        idx[name] = {"saved_at": time.strftime("%Y-%m-%d %H:%M:%S"), "minutes": minutes, "api": api}
         self._write_json(self.index_path, idx)
+
+    def api(self, name):
+        """The notebook/code version a part was saved with (None for results saved before versions were recorded)."""
+        return self._index().get(name, {}).get("api")
 
     def load(self, name):
         with open(self.path(name), "rb") as f:                   # our own files; never load results from someone else
