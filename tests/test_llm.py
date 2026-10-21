@@ -425,3 +425,11 @@ def test_training_flags_reward_far_above_the_best_scripted_dialogue():
     assert sev(diagnose_training(hist(75.0), "B", ceiling=ceil)) == ["warn"]                # +75 over 4 turns = +18.75 per turn
     assert sev(diagnose_training(hist(-16.0), "B", ceiling=ceil)) == ["ok"]
     assert sev(diagnose_training(hist(75.0), "B")) == []                                    # no ceiling given: no claim
+
+
+def test_notebook_api_version_matches_between_code_and_the_built_notebook():
+    import json
+    import pcsa_llm
+    nb = json.load(open("notebooks/pcsa_llm_gpu.ipynb"))
+    src = "\n".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code")
+    assert f"EXPECTED_API = {pcsa_llm.NOTEBOOK_API}" in src                  # bump both together, or Setup stops with a clear message
