@@ -269,3 +269,15 @@ def test_checkpoint_restores_adapter_value_head_and_optimizer(tmp_path):
             assert torch.equal(pa.detach(), pb.detach())
     assert torch.equal(a.value_head.weight, b.value_head.weight)
     assert len(b.opt.state_dict()["state"]) == len(a.opt.state_dict()["state"]) > 0
+
+
+def test_environment_smoke_check_passes_here_and_explains_the_torchao_failure(monkeypatch):
+    import peft
+    from pcsa_llm import envcheck
+    assert envcheck.smoke().startswith("environment ok")
+    def broken(*a, **k):
+        raise ImportError("Found an incompatible version of torchao. Found version 0.10.0, but only versions above 0.16.0 are supported")
+    monkeypatch.setattr(peft, "get_peft_model", broken)
+    with pytest.raises(RuntimeError) as e:
+        envcheck.smoke()
+    assert "pip uninstall -y torchao" in str(e.value) and "restart" in str(e.value).lower()
