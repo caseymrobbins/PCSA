@@ -3,7 +3,7 @@ import numpy as np
 
 from pcsa.metrics import boot_ci
 from .dialogue import DialogueCfg, run_dialogues
-from .llm_user import run_user_gate
+from .llm_user import assertion_probe, run_user_gate
 from .metrics import summarize
 from .scripted import build_dialogue  # noqa: F401  (re-exported for the notebook)
 
@@ -11,7 +11,11 @@ POLICIES = ["agree", "balanced", "selective"] + [f"{h}{k}_agree" for k in (1, 2,
 
 
 def l0_user_gate(user, questions, **kw):
-    return run_user_gate(user, questions, **kw)
+    """The spec's gate (Bayes correlation + direction) plus an assertion-resistance probe the spec's gate does not cover."""
+    out = run_user_gate(user, questions, **kw)
+    out["assertion"] = assertion_probe(user, questions[: min(len(questions), 30)])
+    out["pass_all"] = bool(out["pass"] and out["assertion"]["pass"])
+    return out
 
 
 # ---- L1 ----------------------------------------------------------------------------------------

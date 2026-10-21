@@ -205,3 +205,26 @@ def test_policy_and_critic_are_clipped_separately_so_critic_error_cannot_shrink_
     assert any(g == pol for g in groups) and any(g == val for g in groups)
     lrs = {g["lr"] for g in ppo.opt.param_groups}
     assert lrs == {1e-3, ppo.cfg.vf_lr}
+
+
+def test_train_logs_diagnostics_saves_history_each_iteration_and_stops_on_time_budget(tmp_path):
+    import json
+    chat = tiny_chat()
+    ppo = TurnPPO(chat, PPOCfg(arm="B", lr=1e-3, epochs=1, minibatch=2))
+    lines = []
+    f = tmp_path / "h.jsonl"
+    hist = train(ppo, MockChat(bayes_user), FakeRM(), QS, DialogueCfg(T=2, max_new=6, temperature=1.0), iters=5, per_iter=2,
+                 log=lines.append, jsonl=str(f), max_minutes=1e-9, samples_every=1)
+    assert len(hist) == 1 and hist[0]["stopped"].startswith("time budget")           # stopped after the first iteration, with the reason
+    assert len(f.read_text().splitlines()) == 1 and "diag" in json.loads(f.read_text())
+    assert any("ETA" in l for l in lines) and any("sample [" in l for l in lines)
+
+
+def test_rehearsal_projects_time_without_a_gpu_and_runs_every_arm():
+    from pcsa_llm.loaders import Loaders, memory_plan
+    from pcsa_llm.runs import rehearsal
+    L = Loaders({"l3_policy": "dry", "stages": {}, "rms": {}}, dry=True, plan=memory_plan(1000))
+    out = rehearsal(L, FakeRM(), MockChat(bayes_user), QS, DialogueCfg(T=2, max_new=6, temperature=1.0), plan_iters=40, plan_per_iter=16,
+                    iters=1, per_iter=2, log=lambda *_: None)
+    assert set(out) == {"A", "B", "C"} and all(v["projected_minutes"] > 0 and v["peak_gpu_gb"] is None for v in out.values())
+    assert out["A"]["projected_minutes"] == pytest.approx(out["A"]["sec_per_iter_at_rehearsal_size"] * 40 * 8 / 60)

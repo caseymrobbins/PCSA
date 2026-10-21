@@ -199,3 +199,55 @@ def test_hub_preflight_distinguishes_ok_gated_with_access_gated_without_access_a
     st = check_models(["open", "gated-yes", "gated-no", "missing"])
     assert st["open"] == "ok" and st["gated-yes"].startswith("ok (gated") and st["gated-no"].startswith("NO ACCESS")
     assert st["missing"].startswith("UNAVAILABLE") and set(blocking(st)) == {"gated-no", "missing"}
+
+
+# ---- early-stop guards ---------------------------------------------------------------------------------------------------------
+def _d(cite, kl=0.1, finite=True):
+    return {"cite_rate": cite, "kl": kl, "finite": finite}
+
+
+def test_guards_stop_on_citation_collapse_kl_blowup_and_nonfinite_but_not_on_a_policy_that_never_cited():
+    from pcsa_llm.l_train import DEFAULT_GUARDS, check_guards
+    g = DEFAULT_GUARDS
+    healthy = [_d(0.6)] * 8
+    assert check_guards(healthy, g) is None
+    collapse = [_d(0.6)] * 5 + [_d(0.02)] * 6
+    assert "citation rate collapsed" in check_guards(collapse, g)
+    assert check_guards([_d(0.6)] * 5 + [_d(0.02)] * 3, g) is None                 # not yet 'patience' iterations
+    assert "KL" in check_guards(healthy + [_d(0.6, kl=9.0)], g)
+    assert "non-finite" in check_guards(healthy + [_d(0.6, finite=False)], g)
+    assert check_guards([_d(0.0)] * 12, g) is None                                  # never cited: nothing was lost
+    assert check_guards(collapse, None) is None                                     # guards can be switched off
+
+
+# ---- user assertion-resistance probe ------------------------------------------------------------------------------------------------
+def _sycophant(conv):
+    """Moves 40 points of probability toward whatever the assistant asserts, evidence or not."""
+    import json
+    import re
+    sys_ = conv[0]["content"]
+    ents = re.search(r"these entities is the true source of a signal: ([^.]*)\.", sys_).group(1).split(", ")
+    m = re.search(r"the answer is (\w+);", conv[-1]["content"])
+    p = np.full(len(ents), 0.6 / (len(ents) - 1))
+    if m:
+        p[ents.index(m.group(1))] = 0.4
+    p = p / p.sum()
+    return json.dumps({"stated": ents[int(p.argmax())], "probs": {e: float(x) for e, x in zip(ents, p)}})
+
+
+def test_assertion_probe_separates_a_user_that_ignores_assertions_from_one_that_follows_them():
+    from pcsa_llm.llm_user import assertion_probe
+    good = assertion_probe(MockChat(bayes_user), QS)
+    assert good["pass"] and abs(good["mean_shift"]) < 1e-9 and good["n"] == len(QS)
+    bad = assertion_probe(MockChat(_sycophant), QS)
+    assert not bad["pass"] and bad["mean_shift"] > 0.05 and bad["share_shifted"] > 0.5
+    broken = assertion_probe(MockChat(lambda c: "garbage"), QS[:3])
+    assert not broken["pass"] and broken["dropped"] == 3                            # logged, not filled in
+
+
+def test_l0_reports_both_the_spec_gate_and_the_assertion_probe():
+    from pcsa_llm.l_experiments import l0_user_gate
+    out = l0_user_gate(MockChat(bayes_user), QS, items_per_q=3)
+    assert out["pass"] and out["assertion"]["pass"] and out["pass_all"]
+    out = l0_user_gate(MockChat(_sycophant), QS, items_per_q=3)
+    assert not out["pass_all"]

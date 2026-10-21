@@ -151,10 +151,35 @@ def monitor(samples):
     return out
 
 
-def train(ppo, user, rm, questions, dcfg, iters, per_iter, seed=0, step_fn_factory=None, judge=None, lam=0.0, log=print):
-    """One arm. Arm A uses dcfg.T = 1 (single-turn); B and C use the full horizon with the arm's gamma (set in ppo.cfg)."""
+DEFAULT_GUARDS = dict(min_cite_rate=0.10, patience=5, max_kl=5.0)
+
+
+def check_guards(diag_history, guards):
+    """Reasons to stop early, from per-iteration diagnostics [{'cite_rate','kl','finite'}]. Returns a string or None.
+    Cite collapse only counts if the policy cited at the start (otherwise it never cited and there is nothing to lose)."""
+    if not guards or not diag_history:
+        return None
+    last = diag_history[-1]
+    if not last["finite"]:
+        return "non-finite loss"
+    if last["kl"] is not None and last["kl"] > guards["max_kl"]:
+        return f"KL to reference {last['kl']:.2f} > {guards['max_kl']}"
+    n = guards["patience"]
+    start = np.mean([d["cite_rate"] for d in diag_history[:max(n, 1)]])
+    recent = diag_history[-n:]
+    if len(diag_history) > n and start >= guards["min_cite_rate"] * 2 and all(d["cite_rate"] < guards["min_cite_rate"] for d in recent):
+        return f"citation rate collapsed (<{guards['min_cite_rate']:.0%} for {n} iterations; started at {start:.0%})"
+    return None
+
+
+def train(ppo, user, rm, questions, dcfg, iters, per_iter, seed=0, step_fn_factory=None, judge=None, lam=0.0, log=print,
+          guards=DEFAULT_GUARDS, samples_every=10, jsonl=None, max_minutes=None):
+    """One arm. Arm A uses dcfg.T = 1 (single-turn); B and C use the full horizon with the arm's gamma (set in ppo.cfg).
+    Stops early (and says why) on a guard, on the time budget, or when told to; history is appended to `jsonl` every iteration."""
+    import json
+    import time
     rng = np.random.default_rng(seed)
-    history = []
+    history, diags, t0 = [], [], time.time()
     for it in range(iters):
         qs = [questions[i] for i in rng.choice(len(questions), per_iter, replace=False)]
         step = step_fn_factory(ppo.chat, user, dcfg, seed + it) if step_fn_factory else None
@@ -162,10 +187,31 @@ def train(ppo, user, rm, questions, dcfg, iters, per_iter, seed=0, step_fn_facto
         rewards = turn_rewards(eps, rm, judge, lam)
         samples = build_samples(ppo, eps, rewards)
         diag = ppo.update(samples) if samples else {}
+        turns = [t for e in eps for t in e.turns]
+        d = {"cite_rate": float(np.mean([bool(t["cited"]) for t in turns])) if turns else 0.0,
+             "resp_tokens": float(np.mean([len(t["tokens"][1]) for t in turns if t["tokens"]])) if turns else 0.0,
+             "kl": diag.get("kl"), "finite": all(np.isfinite(v) for v in diag.values())}
+        diags.append(d)
         rec = {"iter": it, "reward": float(np.mean([r.sum() for r in rewards if len(r)])), "summary": summarize(eps), "ppo": diag,
-               "monitor": monitor(samples)}
+               "monitor": monitor(samples), "diag": d}
         if step is not None:
             rec["filter"] = dict(step.stats)
         history.append(rec)
-        log(f"[{it}] reward {rec['reward']:.3f} D {rec['summary']['D']:.3f} CW {rec['summary']['CW']:.2f} SB {rec['summary']['SB']:.2f} {diag}")
+        if jsonl:
+            with open(jsonl, "a") as f:
+                f.write(json.dumps(rec, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o)) + "\n")
+        el = (time.time() - t0) / 60
+        log(f"[{it}] reward {rec['reward']:.3f} D {rec['summary']['D']:.3f} CW {rec['summary']['CW']:.2f} SB {rec['summary']['SB']:.2f} "
+            f"cite {d['cite_rate']:.0%} tok {d['resp_tokens']:.0f} kl {d['kl'] if d['kl'] is None else round(d['kl'], 3)} "
+            f"| {el:.0f} min, ETA {el / (it + 1) * (iters - it - 1):.0f} min")
+        if samples_every and turns and it % samples_every == 0:
+            for t in turns[:2]:
+                log(f"    sample [{t['category']}, r={t.get('reward', float('nan')):.2f}]: {t['text'][:300]!r}")
+        why = check_guards(diags, guards)
+        if why is None and max_minutes and el > max_minutes:
+            why = f"time budget {max_minutes} min reached"
+        if why:
+            history[-1]["stopped"] = why
+            log(f"STOPPED EARLY at iteration {it}: {why}")
+            break
     return history

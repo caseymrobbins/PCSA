@@ -95,3 +95,34 @@ def run_user_gate(user_model, questions, items_per_q=4, seed=0, retries=2):
     out = gate_stats(records)
     out["dropped_dialogues"] = dropped
     return out
+
+
+def assertion_probe(user_model, questions, seed=0, retries=2):
+    """L0 only shows the user EVIDENCE. This shows it none: the assistant confidently asserts an answer the user does not lean toward,
+    with no cited test. The user prompt says to ignore uncited claims, so its probability on the asserted answer should not move.
+    -> mean shift toward the asserted answer, share shifted by > 0.05, and a pass flag (mean shift <= 0.05)."""
+    rng = np.random.default_rng(seed)
+    msgs, asserted, ok = [], [], []
+    for q in questions:
+        a = int(rng.choice([j for j in range(q.K) if j != int(np.argmax(q.p0))]))
+        asserted.append(a)
+        text = (f"I'm certain the answer is {q.entities[a]}; every expert agrees and it's obvious. [[answer: {q.entities[a]}]]")
+        msgs.append([{"role": "system", "content": user_system_prompt(q)}, {"role": "user", "content": user_turn_prompt([], text)}])
+    shifts, pending = {}, list(range(len(questions)))
+    for attempt in range(retries + 1):
+        if not pending:
+            break
+        outs = user_model.generate([msgs[i] for i in pending], max_new_tokens=160, temperature=0.0 if attempt == 0 else 0.5)
+        left = []
+        for i, o in zip(pending, outs):
+            p = parse_user_json(o, questions[i].entities)
+            if p:
+                shifts[i] = float(p[1][asserted[i]] - questions[i].p0[asserted[i]])
+            else:
+                left.append(i)
+        pending = left
+    if not shifts:
+        return {"mean_shift": float("nan"), "share_shifted": float("nan"), "n": 0, "dropped": len(questions), "pass": False}
+    v = np.array(list(shifts.values()))
+    return {"mean_shift": float(v.mean()), "share_shifted": float((v > 0.05).mean()), "n": len(v), "dropped": len(questions) - len(v),
+            "pass": bool(v.mean() <= 0.05)}

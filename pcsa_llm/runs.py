@@ -35,12 +35,15 @@ def critic_report(ppo, eps):
 
 
 def run_arm(loaders, arm, seed, rm, user, train_q, eval_q, dcfg, iters, per_iter, eval_seeds=(0,), step_fn_factory=None,
-            judge=None, lam=0.0, save_dir=None, tag=None, log=print):
+            judge=None, lam=0.0, save_dir=None, tag=None, log=print, guards=None, max_minutes=None):
     """Train one arm (A single-turn, B gamma = 0, C gamma = 0.95) and evaluate it on held-out questions with the full horizon."""
     chat = loaders.policy(loaders.cfg["l3_policy"], seed=seed)
     ppo = TurnPPO(chat, PPOCfg(arm=arm, lr=loaders.cfg.get("lr", 1e-5), grad_ckpt=loaders.plan["grad_ckpt"], minibatch=loaders.plan["minibatch"]))
     tcfg = DialogueCfg(T=1 if arm == "A" else dcfg.T, max_new=dcfg.max_new, temperature=dcfg.temperature, user_retries=dcfg.user_retries)
-    hist = train(ppo, user, rm, train_q, tcfg, iters, per_iter, seed=seed, step_fn_factory=step_fn_factory, judge=judge, lam=lam, log=log)
+    from .l_train import DEFAULT_GUARDS
+    jsonl = f"{save_dir}/{tag or 'arm'}{arm}_seed{seed}.jsonl" if save_dir else None
+    hist = train(ppo, user, rm, train_q, tcfg, iters, per_iter, seed=seed, step_fn_factory=step_fn_factory, judge=judge, lam=lam, log=log,
+                 guards=DEFAULT_GUARDS if guards is None else guards, jsonl=jsonl, max_minutes=max_minutes)
     sums, eps = evaluate(chat, user, eval_q, dcfg, eval_seeds)
     path = None
     if save_dir:
@@ -103,4 +106,33 @@ def l4_states(eps, n):
         if e.turns:
             t = e.turns[0]
             out.append((t["prompt_msgs"], e.q, e.q.lean))
+    return out
+
+
+def rehearsal(loaders, rm, user, train_q, dcfg, plan_iters, plan_per_iter, arms="ABC", iters=2, per_iter=8, log=print):
+    """Dress rehearsal of the real training loop: a couple of tiny iterations per arm to catch crashes and out-of-memory errors,
+    measure seconds per iteration, and project the time of the planned run (linear in dialogues per iteration)."""
+    import time
+    out = {}
+    for arm in arms:
+        chat = loaders.policy(loaders.cfg["l3_policy"], seed=0)
+        ppo = TurnPPO(chat, PPOCfg(arm=arm, lr=loaders.cfg.get("lr", 1e-5), grad_ckpt=loaders.plan["grad_ckpt"], minibatch=loaders.plan["minibatch"]))
+        tcfg = DialogueCfg(T=1 if arm == "A" else dcfg.T, max_new=dcfg.max_new, temperature=dcfg.temperature, user_retries=dcfg.user_retries)
+        peak = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+        except ImportError:
+            torch = None
+        t0 = time.time()
+        hist = train(ppo, user, rm, train_q, tcfg, iters, per_iter, seed=0, log=log, guards=None, samples_every=1)
+        sec = (time.time() - t0) / iters
+        if torch is not None and torch.cuda.is_available():
+            peak = torch.cuda.max_memory_allocated() / 1e9
+        out[arm] = {"sec_per_iter_at_rehearsal_size": sec, "projected_minutes": sec * plan_iters * (plan_per_iter / per_iter) / 60,
+                    "peak_gpu_gb": peak, "cite_rate": hist[-1]["diag"]["cite_rate"], "resp_tokens": hist[-1]["diag"]["resp_tokens"],
+                    "kl_after": hist[-1]["diag"]["kl"]}
+        del ppo, chat
+        loaders.free()
     return out
