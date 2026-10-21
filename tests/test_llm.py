@@ -202,11 +202,11 @@ def test_hub_preflight_distinguishes_ok_gated_with_access_gated_without_access_a
 
 
 # ---- early-stop guards ---------------------------------------------------------------------------------------------------------
-def _d(cite, kl=0.1, finite=True):
-    return {"cite_rate": cite, "kl": kl, "finite": finite}
+def _d(cite, kl=0.1, finite=True, dead=0.0):
+    return {"cite_rate": cite, "kl": kl, "finite": finite, "dead_frac": dead}
 
 
-def test_guards_stop_on_citation_collapse_kl_blowup_and_nonfinite_but_not_on_a_policy_that_never_cited():
+def test_guards_stop_on_sustained_problems_but_tolerate_single_spikes_and_a_policy_that_never_cited():
     from pcsa_llm.l_train import DEFAULT_GUARDS, check_guards
     g = DEFAULT_GUARDS
     healthy = [_d(0.6)] * 8
@@ -214,10 +214,22 @@ def test_guards_stop_on_citation_collapse_kl_blowup_and_nonfinite_but_not_on_a_p
     collapse = [_d(0.6)] * 5 + [_d(0.02)] * 6
     assert "citation rate collapsed" in check_guards(collapse, g)
     assert check_guards([_d(0.6)] * 5 + [_d(0.02)] * 3, g) is None                 # not yet 'patience' iterations
-    assert "KL" in check_guards(healthy + [_d(0.6, kl=9.0)], g)
+    # real logs: isolated KL spikes of 15-100 followed by normal iterations must not abort a run
+    assert check_guards(healthy + [_d(0.6, kl=77.0)], g) is None
+    assert check_guards(healthy + [_d(0.6, kl=77.0), _d(0.6, kl=0.4)], g) is None
+    assert "sustained" in check_guards(healthy + [_d(0.6, kl=9.0), _d(0.6, kl=12.0), _d(0.6, kl=8.0)], g)
     assert "non-finite" in check_guards(healthy + [_d(0.6, finite=False)], g)
     assert check_guards([_d(0.0)] * 12, g) is None                                  # never cited: nothing was lost
     assert check_guards(collapse, None) is None                                     # guards can be switched off
+
+
+def test_guard_stops_when_every_dialogue_is_dropped_repeatedly_but_not_once():
+    from pcsa_llm.l_train import DEFAULT_GUARDS, check_guards
+    base = [_d(0.5)] * 5
+    assert check_guards(base + [_d(0.5, dead=1.0)], DEFAULT_GUARDS) is None         # one all-dropped iteration happens (seen in real logs)
+    assert check_guards(base + [_d(0.5, dead=1.0)] * 2, DEFAULT_GUARDS) is None
+    assert "every dialogue was dropped" in check_guards(base + [_d(0.5, dead=1.0)] * 3, DEFAULT_GUARDS)
+    assert check_guards(base + [_d(0.5, dead=1.0), _d(0.5, dead=0.5), _d(0.5, dead=1.0)], DEFAULT_GUARDS) is None
 
 
 # ---- user assertion-resistance probe ------------------------------------------------------------------------------------------------

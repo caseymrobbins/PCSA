@@ -151,20 +151,26 @@ def monitor(samples):
     return out
 
 
-DEFAULT_GUARDS = dict(min_cite_rate=0.10, patience=5, max_kl=5.0)
+DEFAULT_GUARDS = dict(min_cite_rate=0.10, patience=5, max_kl=5.0, dead_patience=3)
 
 
 def check_guards(diag_history, guards):
-    """Reasons to stop early, from per-iteration diagnostics [{'cite_rate','kl','finite'}]. Returns a string or None.
+    """Reasons to stop early, from per-iteration diagnostics [{'cite_rate','kl','finite','dead_frac'}]. Returns a string or None.
+    Single-iteration spikes are tolerated (the k3 KL estimate has a heavy tail: isolated spikes of 15-100 were followed by normal
+    iterations in real logs); the KL guard needs the MEDIAN of the last 3 iterations above the limit.
     Cite collapse only counts if the policy cited at the start (otherwise it never cited and there is nothing to lose)."""
     if not guards or not diag_history:
         return None
     last = diag_history[-1]
     if not last["finite"]:
         return "non-finite loss"
-    if last["kl"] is not None and last["kl"] > guards["max_kl"]:
-        return f"KL to reference {last['kl']:.2f} > {guards['max_kl']}"
     n = guards["patience"]
+    kls = [d["kl"] for d in diag_history[-3:] if d["kl"] is not None]
+    if len(kls) == 3 and float(np.median(kls)) > guards["max_kl"]:
+        return f"KL to reference sustained above {guards['max_kl']} (median of last 3 = {np.median(kls):.2f})"
+    k = guards.get("dead_patience", 3)
+    if len(diag_history) >= k and all(d.get("dead_frac", 0.0) >= 1.0 for d in diag_history[-k:]):
+        return f"every dialogue was dropped (user JSON invalid at turn 0) for {k} iterations in a row"
     start = np.mean([d["cite_rate"] for d in diag_history[:max(n, 1)]])
     recent = diag_history[-n:]
     if len(diag_history) > n and start >= guards["min_cite_rate"] * 2 and all(d["cite_rate"] < guards["min_cite_rate"] for d in recent):
@@ -190,7 +196,9 @@ def train(ppo, user, rm, questions, dcfg, iters, per_iter, seed=0, step_fn_facto
         turns = [t for e in eps for t in e.turns]
         d = {"cite_rate": float(np.mean([bool(t["cited"]) for t in turns])) if turns else 0.0,
              "resp_tokens": float(np.mean([len(t["tokens"][1]) for t in turns if t["tokens"]])) if turns else 0.0,
-             "kl": diag.get("kl"), "finite": all(np.isfinite(v) for v in diag.values())}
+             "kl": diag.get("kl"), "finite": all(np.isfinite(v) for v in diag.values()),
+             "dead_frac": float(np.mean([len(e.turns) == 0 for e in eps])),          # dialogues with no valid turn at all
+             "dropped_frac": float(np.mean([e.stopped is not None for e in eps]))}  # dialogues cut short by an invalid user reply
         diags.append(d)
         rec = {"iter": it, "reward": float(np.mean([r.sum() for r in rewards if len(r)])), "summary": summarize(eps), "ppo": diag,
                "monitor": monitor(samples), "diag": d}
@@ -202,7 +210,7 @@ def train(ppo, user, rm, questions, dcfg, iters, per_iter, seed=0, step_fn_facto
                 f.write(json.dumps(rec, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o)) + "\n")
         el = (time.time() - t0) / 60
         log(f"[{it}] reward {rec['reward']:.3f} D {rec['summary']['D']:.3f} CW {rec['summary']['CW']:.2f} SB {rec['summary']['SB']:.2f} "
-            f"cite {d['cite_rate']:.0%} tok {d['resp_tokens']:.0f} kl {d['kl'] if d['kl'] is None else round(d['kl'], 3)} "
+            f"cite {d['cite_rate']:.0%} tok {d['resp_tokens']:.0f} dropped {d['dropped_frac']:.0%} kl {d['kl'] if d['kl'] is None else round(d['kl'], 3)} "
             f"| {el:.0f} min, ETA {el / (it + 1) * (iters - it - 1):.0f} min")
         if samples_every and turns and it % samples_every == 0:
             for t in turns[:2]:
