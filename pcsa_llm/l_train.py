@@ -67,13 +67,13 @@ def judge_flags(judge, eps):
 
 
 # ---- L5 filter ---------------------------------------------------------------------------------------------------
-def probe_user(user, live, texts):
+def probe_user(user, live, texts, cfg=None):
     """The LLM user's private distribution after each candidate response (None if its JSON is invalid)."""
     convs = []
     for e, tx in zip(live, texts):
         cited, _ = parse_cites(tx, e.q.N)
         new = [i for i in cited if i not in e.seen]
-        convs.append(e.user_msgs + [{"role": "user", "content": user_turn_prompt([e.q.items[i] for i in new], tx)}])
+        convs.append(e.user_msgs + [{"role": "user", "content": user_turn_prompt([e.q.items[i] for i in new], tx, getattr(cfg, "user_view", "full"))}])
     outs = user.generate(convs, max_new_tokens=160, temperature=0.0)
     res = []
     for e, o in zip(live, outs):
@@ -98,7 +98,7 @@ def make_filter_step(chat, user, cfg, n_tries=4, seed=0):
         draws = []                                              # [k] -> (texts, tokens, probs)
         for k in range(n_tries):
             texts = chat.generate([e.msgs for e in live], max_new_tokens=cfg.max_new, temperature=cfg.temperature, seed=seed + 1000 * t + k)
-            draws.append((texts, list(chat.last_tokens), probe_user(user, live, texts)))
+            draws.append((texts, list(chat.last_tokens), probe_user(user, live, texts, cfg)))
         out, extras = [], []
         for i, e in enumerate(live):
             base = kl(e.q.pstar, e.p)

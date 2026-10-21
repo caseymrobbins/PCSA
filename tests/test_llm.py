@@ -234,15 +234,16 @@ def test_guard_stops_when_every_dialogue_is_dropped_repeatedly_but_not_once():
 
 # ---- user assertion-resistance probe ------------------------------------------------------------------------------------------------
 def _sycophant(conv):
-    """Moves 40 points of probability toward whatever the assistant asserts, evidence or not."""
+    """Starts from its prior, then moves 40 points of probability toward whatever the assistant asserts, evidence or not."""
     import json
     import re
     sys_ = conv[0]["content"]
     ents = re.search(r"these entities is the true source of a signal: ([^.]*)\.", sys_).group(1).split(", ")
+    prior = re.search(r"you believe: ([^\n]*)\.\n", sys_).group(1)
+    p = np.array([float(re.search(rf"{e} (\d+)%", prior).group(1)) for e in ents]) / 100
     m = re.search(r"the answer is (\w+);", conv[-1]["content"])
-    p = np.full(len(ents), 0.6 / (len(ents) - 1))
     if m:
-        p[ents.index(m.group(1))] = 0.4
+        p[ents.index(m.group(1))] += 0.4
     p = p / p.sum()
     return json.dumps({"stated": ents[int(p.argmax())], "probs": {e: float(x) for e, x in zip(ents, p)}})
 
@@ -328,3 +329,57 @@ def test_gate_and_l1_diagnoses_name_the_action_when_they_fail():
           "verdict": {"reward_models_with_selective_advantage": []}}
     f = diagnose_l1(l1)
     assert any(x.severity == "fail" and "gate" in x.title for x in f)
+
+
+# ---- user setups: prompt style, view, reasons, lab ------------------------------------------------------------------------------------
+def test_worked_style_adds_the_procedure_and_both_styles_keep_what_the_mock_user_needs():
+    from pcsa_llm.llm_user import user_system_prompt
+    base, worked = user_system_prompt(QS[0]), user_system_prompt(QS[0], "worked")
+    assert "HOW TO UPDATE" not in base and "HOW TO UPDATE" in worked and "If NO test is listed" in worked and "0.667" in worked
+    for p in (base, worked):
+        assert "these entities is the true source of a signal:" in p and "you believe:" in p and "ONLY a JSON object" in p
+    from pcsa_llm.l_experiments import l0_user_gate
+    assert l0_user_gate(MockChat(bayes_user), QS, items_per_q=3, style="worked")["pass_all"]
+
+
+def test_evidence_only_view_hides_the_assistants_words_and_fixes_an_assertion_follower():
+    from pcsa_llm.llm_user import user_turn_prompt
+    full = user_turn_prompt(["Test 1: x"], "I am certain it is Zed", "full")
+    ev = user_turn_prompt(["Test 1: x"], "I am certain it is Zed", "evidence_only")
+    assert "certain" in full and "certain" not in ev and "Test 1: x" in ev and "Evidence shown this turn:" in ev
+    from pcsa_llm.l_experiments import l0_user_gate
+    follower_full = l0_user_gate(MockChat(_sycophant), QS, items_per_q=3, view="full")
+    follower_ev = l0_user_gate(MockChat(_sycophant), QS, items_per_q=3, view="evidence_only")
+    assert not follower_full["assertion"]["pass"] and follower_ev["assertion"]["pass"] and follower_ev["assertion"]["by_construction"]
+
+
+def test_dialogue_runner_passes_the_user_view_through():
+    seen = []
+    def user(conv):
+        seen.append(conv[-1]["content"])
+        return bayes_user(conv)
+    run_dialogues(MockChat(lambda c: "I am certain it is Zed [[cite: 0]] [[answer: Zed]]"), MockChat(user), QS[:2], DialogueCfg(T=1, user_view="evidence_only"))
+    assert seen and all("certain" not in x for x in seen)
+    seen.clear()
+    run_dialogues(MockChat(lambda c: "I am certain it is Zed [[cite: 0]] [[answer: Zed]]"), MockChat(user), QS[:2], DialogueCfg(T=1, user_view="full"))
+    assert all("certain" in x for x in seen)
+
+
+def test_invalid_replies_are_explained_so_the_prompt_can_be_fixed():
+    from pcsa_llm.llm_user import explain_failure, run_user_gate
+    e = ["A", "B", "C"]
+    assert "no JSON" in explain_failure("sorry", e) and "not valid JSON" in explain_failure("{oops}", e)
+    assert "sum to 1.30" in explain_failure('{"stated": "A", "probs": {"A": 0.6, "B": 0.4, "C": 0.3}}', e)
+    assert "not one of the entities" in explain_failure('{"stated": "Z", "probs": {"A": 0.5, "B": 0.3, "C": 0.2}}', e)
+    g = run_user_gate(MockChat(lambda c: '{"stated": "%s", "probs": {%s}}' % (QS[0].entities[0], ", ".join(f'"{x}": 0.5' for x in QS[0].entities))), QS[:3], items_per_q=2)
+    assert g["dropped_dialogues"] == 3 and any("sum to 1.50" in k for k in g["invalid_reasons"]) and g["n_dialogues"] == 3
+
+
+def test_l0_lab_runs_every_variant_and_the_figure_builds(tmp_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    from pcsa_llm import plots as PL
+    from pcsa_llm.l_experiments import l0_lab
+    lab = l0_lab(MockChat(bayes_user), QS, items_per_q=3)
+    assert set(lab) == {"base/full", "worked/full", "base/evidence_only", "worked/evidence_only"} and all(g["pass_all"] for g in lab.values())
+    assert PL.plot_l0_lab(lab).get_facecolor()[:3] == matplotlib.colors.to_rgb(PL.SURFACE)

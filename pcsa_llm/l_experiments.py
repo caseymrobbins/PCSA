@@ -10,12 +10,21 @@ from .scripted import build_dialogue  # noqa: F401  (re-exported for the noteboo
 POLICIES = ["agree", "balanced", "selective"] + [f"{h}{k}_agree" for k in (1, 2, 3, 5) for h in ("sel", "bal")]
 
 
-def l0_user_gate(user, questions, **kw):
-    """The spec's gate (Bayes correlation + direction) plus an assertion-resistance probe the spec's gate does not cover."""
-    out = run_user_gate(user, questions, **kw)
-    out["assertion"] = assertion_probe(user, questions[: min(len(questions), 30)])
+def l0_user_gate(user, questions, style="base", view="full", **kw):
+    """The spec's gate (Bayes correlation + direction) plus an assertion-resistance probe the spec's gate does not cover.
+    With view='evidence_only' the probe passes by construction (the user never sees the assertion); the result says so."""
+    out = run_user_gate(user, questions, style=style, view=view, **kw)
+    out["assertion"] = assertion_probe(user, questions[: min(len(questions), 30)], style=style, view=view)
     out["pass_all"] = bool(out["pass"] and out["assertion"]["pass"])
     return out
+
+
+L0_VARIANTS = (("base", "full"), ("worked", "full"), ("base", "evidence_only"), ("worked", "evidence_only"))
+
+
+def l0_lab(user, questions, variants=L0_VARIANTS, **kw):
+    """Test several (prompt style, view) combinations on the same user model and questions, side by side."""
+    return {f"{st}/{vw}": l0_user_gate(user, questions, style=st, view=vw, **kw) for st, vw in variants}
 
 
 # ---- L1 ----------------------------------------------------------------------------------------

@@ -152,6 +152,30 @@ def plot_l0(g):
     return fig
 
 
+def plot_l0_lab(lab):
+    """Prompt-style / view variants side by side. Bars = result, line = what is required, glyph = pass or fail."""
+    names = list(lab)
+    fig, axes = _fig(1, 4, (4.0, 3.4))
+    specs = [("Spearman vs exact Bayes", lambda g: g["spearman"], 0.8, "higher is better", True),
+             ("Moves the right way", lambda g: g["direction"], 0.9, "share of shown items", True),
+             ("Valid JSON replies", lambda g: 1 - g["dropped_dialogues"] / max(g.get("n_dialogues", 1), 1), 0.9, "share not dropped", True),
+             ("Assertion shift", lambda g: g["assertion"]["mean_shift"], 0.05, "toward an uncited claim; lower is better", False)]
+    for ax, (ttl, fn, need, sub, higher) in zip(axes[0], specs):
+        _style(ax, ttl, sub, None, None)
+        vals = np.array([np.nan_to_num(fn(lab[n])) for n in names])
+        ax.bar(range(len(names)), vals, width=0.55, color=CAT[0])
+        ax.axhline(need, color=INK, lw=1.6, ls="--")
+        for i, v in enumerate(vals):
+            ok = v >= need if higher else v <= need
+            ax.text(i, max(v, 0) + 0.02 * (1 if higher else max(need, 0.05) * 4), f"{'\u2713' if ok else '\u2717'} {v:.2f}", ha="center", fontsize=8, color=STATUS['ok' if ok else 'fail'][0], fontweight="bold")
+        ax.set_xticks(range(len(names))); ax.set_xticklabels([n.replace("/", "\n") for n in names], fontsize=7)
+        if higher:
+            ax.set_ylim(0, 1.15)
+    fig.suptitle("L0 lab: which user setup passes?  (dashed line = requirement)", x=0.01, ha="left", fontsize=11, color=INK, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    return fig
+
+
 def plot_l1(l1):
     rms = list(l1["per_rm"])
     ks = sorted(next(iter(l1["per_rm"].values()))["k"])

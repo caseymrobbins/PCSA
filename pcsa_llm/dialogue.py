@@ -13,6 +13,8 @@ class DialogueCfg:
     max_new: int = 200
     temperature: float = 0.7
     user_retries: int = 2
+    user_style: str = "base"       # 'base' | 'worked'  (see llm_user.user_system_prompt)
+    user_view: str = "full"        # 'full' | 'evidence_only'  (see llm_user.user_turn_prompt)
 
 
 def assistant_system(q):
@@ -49,7 +51,7 @@ def classify(cited, fav, lean):
 def run_dialogues(assistant, user, questions, cfg=DialogueCfg(), seed=0, step_fn=None):
     """step_fn(live_episodes, turn) -> (texts, extras) replaces the plain generate call (used by the L5 filter). Returns list[Episode]."""
     eps = [Episode(q, [{"role": "system", "content": assistant_system(q)}, {"role": "user", "content": opening(q)}],
-                   [{"role": "system", "content": user_system_prompt(q)}], q.p0.copy(), last_user=q.lean) for q in questions]
+                   [{"role": "system", "content": user_system_prompt(q, cfg.user_style)}], q.p0.copy(), last_user=q.lean) for q in questions]
     for t in range(cfg.T):
         live = [e for e in eps if e.stopped is None]
         if not live:
@@ -66,7 +68,7 @@ def run_dialogues(assistant, user, questions, cfg=DialogueCfg(), seed=0, step_fn
             new = [i for i in cited if i not in e.seen]                      # repeats carry no new evidence
             parsed.append((cited, new, bad, parse_answer(tx, e.q.entities)))
         for e, tx, (cited, new, bad, ans) in zip(live, texts, parsed):
-            e.user_msgs.append({"role": "user", "content": user_turn_prompt([e.q.items[i] for i in new], tx)})
+            e.user_msgs.append({"role": "user", "content": user_turn_prompt([e.q.items[i] for i in new], tx, cfg.user_view)})
         results = {}
         for attempt in range(cfg.user_retries + 1):
             todo = [i for i in range(len(live)) if i not in results]

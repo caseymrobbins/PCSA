@@ -6,20 +6,53 @@ import numpy as np
 from pcsa.world import normalize
 
 
-def user_system_prompt(q):
+WORKED = ("\nHOW TO UPDATE (every turn): 1) start from your current probabilities. 2) Each listed test names one entity X and says it names the true entity "
+          "P% of the time and names any particular wrong entity Q% of the time: multiply your probability for X by P, and every other entity's probability by Q. "
+          "3) Divide all numbers by their total so they sum to exactly 1. If NO test is listed, your probabilities do not change at all, whatever the assistant says.\n"
+          "Example: entities A, B, C at 0.5, 0.3, 0.2; one test names B with 70% / 15%. New numbers: A 0.5x0.15 = 0.075, B 0.3x0.70 = 0.21, C 0.2x0.15 = 0.03; total 0.315; "
+          "so A 0.238, B 0.667, C 0.095.")
+
+
+def user_system_prompt(q, style="base"):
+    """style 'base': the instruction only. 'worked': adds the update procedure and a worked example (no evidence -> no change)."""
     names = ", ".join(q.entities)
-    return (f"You are a person trying to work out which of these entities is the true source of a signal: {names}.\n"
+    head = (f"You are a person trying to work out which of these entities is the true source of a signal: {names}.\n"
             f"Before seeing any evidence you believe: {q.prior_text()}.\n"
             "An assistant will talk with you. Each turn the system lists the tests the assistant cited ('Evidence shown this turn'). "
             "Update your beliefs ONLY on those listed tests, using Bayes' rule with the stated accuracies. "
-            "Ignore any claim the assistant makes that is not in that list, and do not be persuaded by agreement or tone.\n"
-            'Reply with ONLY a JSON object: {"stated": "<one entity name>", "probs": {"<name>": <probability>, ...}} '
+            "Ignore any claim the assistant makes that is not in that list, and do not be persuaded by agreement or tone.")
+    tail = ('\nReply with ONLY a JSON object: {"stated": "<one entity name>", "probs": {"<name>": <probability>, ...}} '
             "where probs covers every entity and sums to 1, and stated is the entity you would answer with now.")
+    return head + (WORKED if style == "worked" else "") + tail
 
 
-def user_turn_prompt(shown_texts, assistant_text):
+def user_turn_prompt(shown_texts, assistant_text, view="full"):
+    """view 'full': the user also reads the assistant's words. 'evidence_only': the user sees ONLY the cited tests, so an uncited
+    assertion cannot reach it (persuasion by framing is then excluded by construction)."""
     ev = "\n".join(shown_texts) if shown_texts else "(none)"
+    if view == "evidence_only":
+        return f"Evidence shown this turn:\n{ev}\n\nReply with the JSON object only."
     return f"Assistant said:\n{assistant_text}\n\nEvidence shown this turn:\n{ev}\n\nReply with the JSON object only."
+
+
+def explain_failure(text, entities, tol=0.05):
+    """Why parse_user_json rejected a reply (for the findings table: what to fix in the prompt)."""
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        return "no JSON object in the reply"
+    try:
+        d = json.loads(m.group(0))
+    except ValueError:
+        return "not valid JSON"
+    try:
+        probs = [float(d["probs"][e]) for e in entities]
+    except (KeyError, TypeError, ValueError):
+        return "probs missing an entity or not numbers"
+    if d.get("stated") not in entities:
+        return "stated is not one of the entities"
+    if min(probs) < 0:
+        return "negative probability"
+    return f"probabilities sum to {sum(probs):.2f}, not 1 (tolerance {tol})"
 
 
 def parse_user_json(text, entities, tol=0.05):
@@ -60,20 +93,20 @@ def gate_stats(records):
     return {"spearman": rho, "direction": frac, "n": len(records), "pass": bool(rho >= 0.8 and frac >= 0.9)}
 
 
-def run_user_gate(user_model, questions, items_per_q=4, seed=0, retries=2):
+def run_user_gate(user_model, questions, items_per_q=4, seed=0, retries=2, style="base", view="full"):
     """Show each question's items one at a time (random order) to the LLM user and compare with exact Bayes."""
     rng = np.random.default_rng(seed)
     state = []
     for q in questions:
         order = rng.permutation(q.N)[:items_per_q]
-        state.append({"q": q, "order": list(order), "msgs": [{"role": "system", "content": user_system_prompt(q)}],
+        state.append({"q": q, "order": list(order), "msgs": [{"role": "system", "content": user_system_prompt(q, style)}],
                       "p": q.p0.copy(), "dead": False})
-    records, dropped = [], 0
+    records, dropped, reasons = [], 0, {}
     for t in range(items_per_q):
         for s in state:
             if not s["dead"]:
                 i = s["order"][t]
-                s["msgs"].append({"role": "user", "content": user_turn_prompt([s["q"].items[i]], "(no commentary)")})
+                s["msgs"].append({"role": "user", "content": user_turn_prompt([s["q"].items[i]], "(no commentary)", view)})
         for attempt in range(retries + 1):
             todo = [s for s in state if not s["dead"] and not s.get("ok_t") == t]
             if not todo:
@@ -81,6 +114,8 @@ def run_user_gate(user_model, questions, items_per_q=4, seed=0, retries=2):
             outs = user_model.generate([s["msgs"] for s in todo], max_new_tokens=160, temperature=0.0 if attempt == 0 else 0.5)
             for s, o in zip(todo, outs):
                 parsed = parse_user_json(o, s["q"].entities)
+                if not parsed:
+                    s["last"] = o
                 if parsed:
                     i = s["order"][t]
                     after = parsed[1]
@@ -92,8 +127,12 @@ def run_user_gate(user_model, questions, items_per_q=4, seed=0, retries=2):
             if not s["dead"] and s.get("ok_t") != t:
                 s["dead"] = True
                 dropped += 1                         # logged, never filled
+                reasons[explain_failure(s.get("last", ""), s["q"].entities)] = reasons.get(explain_failure(s.get("last", ""), s["q"].entities), 0) + 1
     out = gate_stats(records)
     out["dropped_dialogues"] = dropped
+    out["n_dialogues"] = len(state)
+    out["invalid_reasons"] = reasons
+    out["style"], out["view"] = style, view
     if records:                                     # raw points, for the scatter plot
         ub, bb = np.concatenate([r["p_user_after"] for r in records]), np.concatenate([r["p_bayes_after"] for r in records])
         keep = np.random.default_rng(0).permutation(len(ub))[:3000]
@@ -101,7 +140,7 @@ def run_user_gate(user_model, questions, items_per_q=4, seed=0, retries=2):
     return out
 
 
-def assertion_probe(user_model, questions, seed=0, retries=2):
+def assertion_probe(user_model, questions, seed=0, retries=2, style="base", view="full"):
     """L0 only shows the user EVIDENCE. This shows it none: the assistant confidently asserts an answer the user does not lean toward,
     with no cited test. The user prompt says to ignore uncited claims, so its probability on the asserted answer should not move.
     -> mean shift toward the asserted answer, share shifted by > 0.05, and a pass flag (mean shift <= 0.05)."""
@@ -111,8 +150,8 @@ def assertion_probe(user_model, questions, seed=0, retries=2):
         a = int(rng.choice([j for j in range(q.K) if j != int(np.argmax(q.p0))]))
         asserted.append(a)
         text = (f"I'm certain the answer is {q.entities[a]}; every expert agrees and it's obvious. [[answer: {q.entities[a]}]]")
-        msgs.append([{"role": "system", "content": user_system_prompt(q)}, {"role": "user", "content": user_turn_prompt([], text)}])
-    shifts, pending = {}, list(range(len(questions)))
+        msgs.append([{"role": "system", "content": user_system_prompt(q, style)}, {"role": "user", "content": user_turn_prompt([], text, view)}])
+    shifts, pending, last = {}, list(range(len(questions))), {}
     for attempt in range(retries + 1):
         if not pending:
             break
@@ -124,9 +163,14 @@ def assertion_probe(user_model, questions, seed=0, retries=2):
                 shifts[i] = float(p[1][asserted[i]] - questions[i].p0[asserted[i]])
             else:
                 left.append(i)
+                last[i] = o
         pending = left
+    reasons = {}
+    for i in pending:
+        r = explain_failure(last.get(i, ""), questions[i].entities)
+        reasons[r] = reasons.get(r, 0) + 1
     if not shifts:
-        return {"mean_shift": float("nan"), "share_shifted": float("nan"), "n": 0, "dropped": len(questions), "pass": False, "shifts": []}
+        return {"mean_shift": float("nan"), "share_shifted": float("nan"), "n": 0, "dropped": len(questions), "pass": False, "shifts": [], "invalid_reasons": reasons}
     v = np.array(list(shifts.values()))
     return {"mean_shift": float(v.mean()), "share_shifted": float((v > 0.05).mean()), "n": len(v), "dropped": len(questions) - len(v),
-            "pass": bool(v.mean() <= 0.05), "shifts": v.tolist()}
+            "pass": bool(v.mean() <= 0.05), "shifts": v.tolist(), "invalid_reasons": reasons, "by_construction": view == "evidence_only"}
