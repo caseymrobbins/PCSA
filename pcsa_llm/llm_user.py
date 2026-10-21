@@ -94,6 +94,10 @@ def run_user_gate(user_model, questions, items_per_q=4, seed=0, retries=2):
                 dropped += 1                         # logged, never filled
     out = gate_stats(records)
     out["dropped_dialogues"] = dropped
+    if records:                                     # raw points, for the scatter plot
+        ub, bb = np.concatenate([r["p_user_after"] for r in records]), np.concatenate([r["p_bayes_after"] for r in records])
+        keep = np.random.default_rng(0).permutation(len(ub))[:3000]
+        out["points"] = {"bayes": bb[keep].tolist(), "user": ub[keep].tolist()}
     return out
 
 
@@ -122,7 +126,7 @@ def assertion_probe(user_model, questions, seed=0, retries=2):
                 left.append(i)
         pending = left
     if not shifts:
-        return {"mean_shift": float("nan"), "share_shifted": float("nan"), "n": 0, "dropped": len(questions), "pass": False}
+        return {"mean_shift": float("nan"), "share_shifted": float("nan"), "n": 0, "dropped": len(questions), "pass": False, "shifts": []}
     v = np.array(list(shifts.values()))
     return {"mean_shift": float(v.mean()), "share_shifted": float((v > 0.05).mean()), "n": len(v), "dropped": len(questions) - len(v),
-            "pass": bool(v.mean() <= 0.05)}
+            "pass": bool(v.mean() <= 0.05), "shifts": v.tolist()}

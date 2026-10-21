@@ -35,15 +35,15 @@ def critic_report(ppo, eps):
 
 
 def run_arm(loaders, arm, seed, rm, user, train_q, eval_q, dcfg, iters, per_iter, eval_seeds=(0,), step_fn_factory=None,
-            judge=None, lam=0.0, save_dir=None, tag=None, log=print, guards=None, max_minutes=None):
+            judge=None, lam=0.0, save_dir=None, tag=None, log=print, guards=None, max_minutes=None, ckpt=None, ckpt_every=10, jsonl=None):
     """Train one arm (A single-turn, B gamma = 0, C gamma = 0.95) and evaluate it on held-out questions with the full horizon."""
     chat = loaders.policy(loaders.cfg["l3_policy"], seed=seed)
     ppo = TurnPPO(chat, PPOCfg(arm=arm, lr=loaders.cfg.get("lr", 1e-5), grad_ckpt=loaders.plan["grad_ckpt"], minibatch=loaders.plan["minibatch"]))
     tcfg = DialogueCfg(T=1 if arm == "A" else dcfg.T, max_new=dcfg.max_new, temperature=dcfg.temperature, user_retries=dcfg.user_retries)
     from .l_train import DEFAULT_GUARDS
-    jsonl = f"{save_dir}/{tag or 'arm'}{arm}_seed{seed}.jsonl" if save_dir else None
+    jsonl = jsonl or (f"{save_dir}/{tag or 'arm'}{arm}_seed{seed}.jsonl" if save_dir else None)
     hist = train(ppo, user, rm, train_q, tcfg, iters, per_iter, seed=seed, step_fn_factory=step_fn_factory, judge=judge, lam=lam, log=log,
-                 guards=DEFAULT_GUARDS if guards is None else guards, jsonl=jsonl, max_minutes=max_minutes)
+                 guards=DEFAULT_GUARDS if guards is None else guards, jsonl=jsonl, max_minutes=max_minutes, ckpt=ckpt, ckpt_every=ckpt_every)
     sums, eps = evaluate(chat, user, eval_q, dcfg, eval_seeds)
     path = None
     if save_dir:
@@ -51,6 +51,9 @@ def run_arm(loaders, arm, seed, rm, user, train_q, eval_q, dcfg, iters, per_iter
         path = f"{save_dir}/{tag or 'arm'}{arm}_seed{seed}"
         ppo.model.save_pretrained(path)
         torch.save(ppo.value_head.state_dict(), f"{path}/value_head.pt")
+    import os
+    if ckpt and os.path.exists(ckpt):
+        os.remove(ckpt)                                  # finished: the saved adapter and the stage result supersede it
     # no model handles are returned, so the caller can free GPU memory before the next arm
     return {"arm": arm, "seed": seed, "history": hist, "eval": sums, "critic": critic_report(ppo, eps), "eval_eps": eps, "path": path}
 

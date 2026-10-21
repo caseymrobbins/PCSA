@@ -263,3 +263,68 @@ def test_l0_reports_both_the_spec_gate_and_the_assertion_probe():
     assert out["pass"] and out["assertion"]["pass"] and out["pass_all"]
     out = l0_user_gate(MockChat(_sycophant), QS, items_per_q=3)
     assert not out["pass_all"]
+
+
+# ---- run state store ----------------------------------------------------------------------------------------------------------------
+def test_store_saves_atomically_skips_done_parts_and_resets(tmp_path):
+    from pcsa_llm.store import Store
+    s = Store(tmp_path)
+    assert not s.done("L3/A/s0") and s.status(["L3/A/s0"])[0]["state"] == "not started"
+    s.save("L3/A/s0", {"x": np.arange(3)}, minutes=1.5)
+    assert s.done("L3/A/s0") and (s.load("L3/A/s0")["x"] == np.arange(3)).all()
+    assert not list(tmp_path.glob("*.tmp"))                                   # no half-written files left behind
+    s.ckpt("L3/B/s0").write_bytes(b"x")
+    st = {r["part"]: r["state"] for r in Store(tmp_path).status(["L3/A/s0", "L3/B/s0", "L3/C/s0"])}   # a new process sees the same state
+    assert st == {"L3/A/s0": "done", "L3/B/s0": "in progress (checkpoint)", "L3/C/s0": "not started"}
+    s.reset("L3/A/s0")
+    assert not s.done("L3/A/s0")
+    s.add_findings("L1", [{"severity": "warn", "title": "t", "evidence": "e", "action": "a"}])
+    assert Store(tmp_path).all_findings()["L1"][0]["title"] == "t"
+
+
+# ---- self-diagnosis ----------------------------------------------------------------------------------------------------------------------
+def _hist(n, reward, cite, tokens, kl=0.3, vloss=10.0, dropped=0.0, dead=0.0, cw=0.1):
+    out = []
+    for i in range(n):
+        out.append({"iter": i, "minutes": i * 1.0, "reward": reward(i), "summary": {"D": 1.2, "CW": cw, "SB": 0.4 if cite(i) > 0.1 else float("nan"),
+                    "agree": 0.5, "selective": 0.2}, "ppo": {"vloss": vloss(i) if callable(vloss) else vloss},
+                    "diag": {"cite_rate": cite(i), "resp_tokens": tokens(i), "kl": kl(i) if callable(kl) else kl, "dropped_frac": dropped, "dead_frac": dead}})
+    return out
+
+
+def test_diagnosis_recognises_the_failure_patterns_seen_in_real_logs():
+    from pcsa_llm.diagnose import diagnose_training
+    sev = lambda fs, title: [f.severity for f in fs if f.title.startswith(title)]
+    # arm A pattern: reward up, citations vanish, KL grows with isolated spikes, critic fits
+    h = _hist(60, lambda i: -8 + 0.15 * i, lambda i: 0.6 if i < 15 else 0.02, lambda i: 120, kl=lambda i: 0.01 * i + (40 if i in (10, 20, 30, 40, 50) else 0), vloss=lambda i: 80 - i)
+    fs = diagnose_training(h, "A")
+    assert sev(fs, "Reward model score") == ["ok"] and sev(fs, "Policy stopped citing") == ["fail"]
+    assert sev(fs, "KL to the reference") == ["warn"] and sev(fs, "Critic fit") == ["ok"]
+    assert all(f.action for f in fs if f.severity in ("warn", "fail"))             # every problem names a next step
+    # one isolated spike in 60 iterations is tolerated
+    one = diagnose_training(_hist(60, lambda i: -8 + 0.15 * i, lambda i: 0.6, lambda i: 120, kl=lambda i: 40 if i == 30 else 0.3), "one")
+    assert sev(one, "KL to the reference") == ["ok"]
+    # healthy run
+    ok = diagnose_training(_hist(60, lambda i: -8 + 0.15 * i, lambda i: 0.6, lambda i: 120 + (i % 3)), "B")
+    assert sev(ok, "Policy still cites") == ["ok"] and not [f for f in ok if f.severity == "fail"]
+    # length coupling: reward rises with response length
+    L = diagnose_training(_hist(60, lambda i: i * 1.0, lambda i: 0.6, lambda i: 100 + 10 * i), "L")
+    assert sev(L, "Reward tracks response length") == ["warn"]
+    # sustained KL and dropped dialogues
+    bad = diagnose_training(_hist(40, lambda i: 0.0, lambda i: 0.6, lambda i: 100, kl=8.0, dropped=0.4, dead=0.0), "X")
+    assert sev(bad, "KL to the reference") == ["fail"] and sev(bad, "Dialogues dropped") == ["warn"]
+    assert diagnose_training(_hist(3, lambda i: 0.0, lambda i: 0.5, lambda i: 100), "short")[0].severity == "info"
+    stopped = _hist(20, lambda i: 0.0, lambda i: 0.5, lambda i: 100); stopped[-1]["stopped"] = "citation rate collapsed (x)"
+    assert diagnose_training(stopped, "S")[0].severity == "fail"
+
+
+def test_gate_and_l1_diagnoses_name_the_action_when_they_fail():
+    from pcsa_llm.diagnose import diagnose_l0, diagnose_l1
+    g = {"pass": True, "spearman": 0.99, "direction": 1.0, "dropped_dialogues": 0,
+         "assertion": {"pass": False, "mean_shift": 0.2, "share_shifted": 0.8, "dropped": 0, "n": 10}}
+    f = diagnose_l0(g)
+    assert [x.severity for x in f] == ["ok", "fail"] and f[1].action
+    l1 = {"per_rm": {"rm": {"k": {1: (0.1, 0.0, 0.2), 2: (-0.5, -0.9, -0.1)}, "agree_after_correction_minus_turn1": (0.0, -0.1, 0.1)}},
+          "verdict": {"reward_models_with_selective_advantage": []}}
+    f = diagnose_l1(l1)
+    assert any(x.severity == "fail" and "gate" in x.title for x in f)

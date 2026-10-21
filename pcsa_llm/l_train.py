@@ -179,14 +179,26 @@ def check_guards(diag_history, guards):
 
 
 def train(ppo, user, rm, questions, dcfg, iters, per_iter, seed=0, step_fn_factory=None, judge=None, lam=0.0, log=print,
-          guards=DEFAULT_GUARDS, samples_every=10, jsonl=None, max_minutes=None):
+          guards=DEFAULT_GUARDS, samples_every=10, jsonl=None, max_minutes=None, ckpt=None, ckpt_every=10):
     """One arm. Arm A uses dcfg.T = 1 (single-turn); B and C use the full horizon with the arm's gamma (set in ppo.cfg).
-    Stops early (and says why) on a guard, on the time budget, or when told to; history is appended to `jsonl` every iteration."""
+    Stops early (and says why) on a guard, on the time budget, or when told to. History is appended to `jsonl` every iteration.
+    With `ckpt`, a checkpoint is written every `ckpt_every` iterations and an existing one is resumed: stop the cell at any time and
+    re-run it; at most `ckpt_every` iterations are lost. Questions are drawn per (seed, iteration), so a resumed run sees the same data."""
     import json
+    import os
     import time
-    rng = np.random.default_rng(seed)
-    history, diags, t0 = [], [], time.time()
-    for it in range(iters):
+    history, diags, start = [], [], 0
+    if ckpt and os.path.exists(ckpt):
+        last, history = ppo.load_checkpoint(ckpt)
+        start, diags = last + 1, [h["diag"] for h in history]
+        log(f"RESUMED from checkpoint after iteration {last} ({len(history)} iterations of history)")
+        if jsonl:
+            with open(jsonl, "w") as f:                      # rewrite so iterations after the checkpoint are not duplicated
+                for rec in history:
+                    f.write(json.dumps(rec, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o)) + "\n")
+    t0 = time.time() - (history[-1].get("minutes", 0.0) * 60 if history else 0.0)
+    for it in range(start, iters):
+        rng = np.random.default_rng([seed, it])
         qs = [questions[i] for i in rng.choice(len(questions), per_iter, replace=False)]
         step = step_fn_factory(ppo.chat, user, dcfg, seed + it) if step_fn_factory else None
         eps = run_dialogues(ppo.chat, user, qs, dcfg, seed=seed + 977 * it, step_fn=step)
@@ -200,7 +212,8 @@ def train(ppo, user, rm, questions, dcfg, iters, per_iter, seed=0, step_fn_facto
              "dead_frac": float(np.mean([len(e.turns) == 0 for e in eps])),          # dialogues with no valid turn at all
              "dropped_frac": float(np.mean([e.stopped is not None for e in eps]))}  # dialogues cut short by an invalid user reply
         diags.append(d)
-        rec = {"iter": it, "reward": float(np.mean([r.sum() for r in rewards if len(r)])), "summary": summarize(eps), "ppo": diag,
+        el = (time.time() - t0) / 60
+        rec = {"iter": it, "minutes": el, "reward": float(np.mean([r.sum() for r in rewards if len(r)])), "summary": summarize(eps), "ppo": diag,
                "monitor": monitor(samples), "diag": d}
         if step is not None:
             rec["filter"] = dict(step.stats)
@@ -208,10 +221,10 @@ def train(ppo, user, rm, questions, dcfg, iters, per_iter, seed=0, step_fn_facto
         if jsonl:
             with open(jsonl, "a") as f:
                 f.write(json.dumps(rec, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o)) + "\n")
-        el = (time.time() - t0) / 60
+        done_n = it + 1 - start
         log(f"[{it}] reward {rec['reward']:.3f} D {rec['summary']['D']:.3f} CW {rec['summary']['CW']:.2f} SB {rec['summary']['SB']:.2f} "
             f"cite {d['cite_rate']:.0%} tok {d['resp_tokens']:.0f} dropped {d['dropped_frac']:.0%} kl {d['kl'] if d['kl'] is None else round(d['kl'], 3)} "
-            f"| {el:.0f} min, ETA {el / (it + 1) * (iters - it - 1):.0f} min")
+            f"| {el:.0f} min, ETA {(time.time() - t0) / 60 / max(done_n, 1) * (iters - it - 1):.0f} min")
         if samples_every and turns and it % samples_every == 0:
             for t in turns[:2]:
                 log(f"    sample [{t['category']}, r={t.get('reward', float('nan')):.2f}]: {t['text'][:300]!r}")
@@ -222,4 +235,6 @@ def train(ppo, user, rm, questions, dcfg, iters, per_iter, seed=0, step_fn_facto
             history[-1]["stopped"] = why
             log(f"STOPPED EARLY at iteration {it}: {why}")
             break
+        if ckpt and (it + 1) % ckpt_every == 0:
+            ppo.save_checkpoint(ckpt, it, history)
     return history

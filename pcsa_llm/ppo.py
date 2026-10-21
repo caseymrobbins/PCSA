@@ -148,6 +148,24 @@ class TurnPPO:
         self.model.eval()
         return {k: float(np.mean(v)) for k, v in diag.items()}
 
+    def save_checkpoint(self, path, it, history):
+        """Adapter, value head, optimizer and history after iteration `it` (atomic write)."""
+        import os
+        from peft import get_peft_model_state_dict
+        tmp = str(path) + ".tmp"
+        self.torch.save({"lora": get_peft_model_state_dict(self.model), "value_head": self.value_head.state_dict(), "opt": self.opt.state_dict(),
+                         "iter": it, "history": history}, tmp)
+        os.replace(tmp, path)
+
+    def load_checkpoint(self, path):
+        """Restore a checkpoint written by save_checkpoint (our own file). -> (last finished iteration, history)."""
+        from peft import set_peft_model_state_dict
+        ck = self.torch.load(path, map_location=self.chat.device, weights_only=False)
+        set_peft_model_state_dict(self.model, ck["lora"])
+        self.value_head.load_state_dict(ck["value_head"])
+        self.opt.load_state_dict(ck["opt"])
+        return ck["iter"], ck["history"]
+
     def values(self, samples):
         """Critic value of each sample's state (prompt end), no grad."""
         out = []

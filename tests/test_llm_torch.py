@@ -228,3 +228,44 @@ def test_rehearsal_projects_time_without_a_gpu_and_runs_every_arm():
                     iters=1, per_iter=2, log=lambda *_: None)
     assert set(out) == {"A", "B", "C"} and all(v["projected_minutes"] > 0 and v["peak_gpu_gb"] is None for v in out.values())
     assert out["A"]["projected_minutes"] == pytest.approx(out["A"]["sec_per_iter_at_rehearsal_size"] * 40 * 8 / 60)
+
+
+def test_training_resumes_from_a_checkpoint_and_continues_the_history(tmp_path):
+    import json
+    ck, jl = str(tmp_path / "a.ckpt"), str(tmp_path / "a.jsonl")
+    mk = lambda: TurnPPO(tiny_chat(), PPOCfg(arm="B", lr=1e-3, epochs=1, minibatch=2))
+    kw = dict(user=MockChat(bayes_user), rm=FakeRM(), questions=QS, dcfg=DialogueCfg(T=2, max_new=6, temperature=1.0), per_iter=2,
+              log=lambda *_: None, samples_every=0, ckpt=ck, ckpt_every=1, jsonl=jl)
+    ppo1 = mk()
+    h1 = train(ppo1, iters=2, **kw)                                          # "interrupted" after 2 of 4 iterations
+    assert [h["iter"] for h in h1] == [0, 1]
+    w_saved = {n: p.detach().clone() for n, p in ppo1.model.named_parameters() if "lora" in n}
+    ppo2 = mk()
+    lines = []
+    kw2 = dict(kw, log=lines.append)
+    h2 = train(ppo2, iters=4, **kw2)                                         # fresh process: resumes from the checkpoint
+    assert any("RESUMED" in l for l in lines)
+    assert [h["iter"] for h in h2] == [0, 1, 2, 3]                           # continues, does not restart
+    assert all(h2[i]["reward"] == h1[i]["reward"] for i in (0, 1))           # earlier history is kept as it was
+    rows = [json.loads(l)["iter"] for l in open(jl)]
+    assert rows == [0, 1, 2, 3]                                              # jsonl has no duplicates after the resume
+    # the weights loaded at resume are the saved ones: before the first resumed update, they matched
+    ppo3 = mk(); last, _ = ppo3.load_checkpoint(ck)
+    assert last == 3
+
+
+def test_checkpoint_restores_adapter_value_head_and_optimizer(tmp_path):
+    ck = str(tmp_path / "b.ckpt")
+    a = TurnPPO(tiny_chat(), PPOCfg(arm="C", lr=1e-2, epochs=1, minibatch=2))
+    eps = run_dialogues(a.chat, MockChat(bayes_user), QS[:3], D, seed=0)
+    from pcsa_llm.l_train import build_samples
+    a.update(build_samples(a, eps, turn_rewards(eps, FakeRM())))
+    a.save_checkpoint(ck, 7, [{"x": 1}])
+    b = TurnPPO(tiny_chat(), PPOCfg(arm="C", lr=1e-2, epochs=1, minibatch=2))
+    last, hist = b.load_checkpoint(ck)
+    assert last == 7 and hist == [{"x": 1}]
+    for (n, pa), (_, pb) in zip(a.model.named_parameters(), b.model.named_parameters()):
+        if "lora" in n:
+            assert torch.equal(pa.detach(), pb.detach())
+    assert torch.equal(a.value_head.weight, b.value_head.weight)
+    assert len(b.opt.state_dict()["state"]) == len(a.opt.state_dict()["state"]) > 0
