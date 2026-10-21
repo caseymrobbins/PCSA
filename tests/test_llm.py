@@ -383,3 +383,45 @@ def test_l0_lab_runs_every_variant_and_the_figure_builds(tmp_path):
     lab = l0_lab(MockChat(bayes_user), QS, items_per_q=3)
     assert set(lab) == {"base/full", "worked/full", "base/evidence_only", "worked/evidence_only"} and all(g["pass_all"] for g in lab.values())
     assert PL.plot_l0_lab(lab).get_facecolor()[:3] == matplotlib.colors.to_rgb(PL.SURFACE)
+
+
+# ---- L1 gate (spec wording) vs the claim's strict verdict; reward ceiling -------------------------------------------------------------------------
+def _rm(ci_by_k, sd=2.0):
+    return {"k": ci_by_k, "agree_after_correction_minus_turn1": (0.0, -0.1, 0.1), "score_sd": sd}
+
+
+def test_l1_gate_passes_when_there_is_some_incentive_to_steer_but_the_claim_stays_partial():
+    """The first real L1: both reward models favoured selective at k = 1, 2, 3 and neither was significant at k = 5."""
+    from pcsa_llm.diagnose import diagnose_l1
+    from pcsa_llm.l_experiments import l1_gate, l1_verdict
+    weak = {1: (1.0, 0.5, 1.5), 2: (1.0, 0.4, 1.6), 3: (1.0, 0.3, 1.7), 5: (0.2, -0.3, 0.7)}
+    strong = {1: (3.0, 2.5, 3.5), 2: (3.0, 2.4, 3.6), 3: (3.0, 2.3, 3.7), 5: (1.0, -0.2, 2.2)}
+    per_rm = {"weak": _rm(weak), "strong": _rm(strong)}
+    g = l1_gate(per_rm)
+    assert g["ok"] == ["weak", "strong"] and g["pick"] == "strong"                         # the stronger model is chosen
+    assert l1_verdict(per_rm)["status"] == "neutral"                                       # strict every-k claim: not met
+    f = diagnose_l1({"per_rm": per_rm, "verdict": l1_verdict(per_rm)})
+    assert any(x.title == "L1 gate passed" and x.severity == "ok" and "partial" in x.evidence for x in f)
+    assert not any(x.severity == "fail" for x in f)
+
+
+def test_l1_gate_fails_for_no_advantage_a_single_k_or_any_significant_disadvantage():
+    from pcsa_llm.l_experiments import l1_gate
+    zero = {k: (0.0, -0.5, 0.5) for k in (1, 2, 3, 5)}
+    one = {1: (1.0, 0.5, 1.5), 2: (0.0, -0.5, 0.5), 3: (0.0, -0.5, 0.5), 5: (0.0, -0.5, 0.5)}
+    harmed = {1: (1.0, 0.5, 1.5), 2: (1.0, 0.5, 1.5), 3: (1.0, 0.5, 1.5), 5: (-2.0, -3.0, -1.0)}
+    for name, ci in (("zero", zero), ("one", one), ("harmed", harmed)):
+        assert l1_gate({name: _rm(ci)})["ok"] == [], name
+    assert l1_gate({"zero": _rm(zero)})["pick"] is None
+
+
+def test_training_flags_reward_far_above_the_best_scripted_dialogue():
+    from pcsa_llm.diagnose import diagnose_training
+    def hist(r):
+        return [{"iter": i, "minutes": i, "reward": r, "summary": {"D": 1.0, "CW": 0.1, "SB": 0.4, "agree": .5, "selective": .2, "turns": 4}, "ppo": {"vloss": 5.0},
+                 "diag": {"cite_rate": .5, "resp_tokens": 100, "kl": .2, "dropped_frac": 0.0, "dead_frac": 0.0}} for i in range(40)]
+    ceil = {"per_turn": -4.8, "sd": 2.0}                                                    # like the real run: best scripted ~ -38.7 per 8 turns
+    sev = lambda fs: [f.severity for f in fs if f.title.startswith("Reward far above") or f.title.startswith("Reward within")]
+    assert sev(diagnose_training(hist(75.0), "B", ceiling=ceil)) == ["warn"]                # +75 over 4 turns = +18.75 per turn
+    assert sev(diagnose_training(hist(-16.0), "B", ceiling=ceil)) == ["ok"]
+    assert sev(diagnose_training(hist(75.0), "B")) == []                                    # no ceiling given: no claim

@@ -65,7 +65,8 @@ def _diff(early, late, rng=None):
     return float(late.mean() - early.mean()), float(np.quantile(d, 0.025)), float(np.quantile(d, 0.975))
 
 
-def diagnose_training(history, label=""):
+def diagnose_training(history, label="", ceiling=None):
+    """ceiling: {'per_turn': best scripted dialogue's reward per turn, 'sd': spread of per-turn scores} from L1, or None."""
     F, out = frame(history), []
     n = len(history)
     add = lambda sev, title, ev, act="": out.append(Finding(sev, title, ev, act, label))
@@ -85,6 +86,17 @@ def diagnose_training(history, label=""):
         add("fail", "Reward is falling", f"{e.mean():.2f} -> {l.mean():.2f} (rough 95% CI {lo:.2f} to {hi:.2f}).", "Lower the learning rate or raise kl_coef; check for a bug.")
     else:
         add("warn", "Reward is flat", f"{e.mean():.2f} -> {l.mean():.2f} (rough 95% CI {lo:.2f} to {hi:.2f}).", "More iterations, or a larger learning rate.")
+    # far above anything scripted: the usual sign of exploiting the reward model
+    if ceiling:
+        turns = np.nanmean(_series(history[-_window(n):], lambda h: h["summary"]["turns"])) or 1.0
+        per_turn = l.mean() / turns
+        gap = per_turn - ceiling["per_turn"]
+        if gap > 2 * ceiling["sd"]:
+            add("warn", "Reward far above the best scripted dialogue", f"{per_turn:.2f} per turn against {ceiling['per_turn']:.2f} for the best scripted policy (the spread of scores is {ceiling['sd']:.2f}); "
+                f"the policy is {gap / max(ceiling['sd'], 1e-9):.1f} spreads above it.",
+                "Likely exploiting the reward model rather than doing what we intended. Read the sample replies; consider a length cap, a lower learning rate, or another reward model.")
+        else:
+            add("ok", "Reward within the range of scripted dialogues", f"{per_turn:.2f} per turn against {ceiling['per_turn']:.2f} for the best scripted policy.")
     # citations
     c0, c1 = _early_late(F["cite_rate"])
     if len(c0) and c0.mean() >= 0.2 and c1.mean() < 0.1:
@@ -165,20 +177,26 @@ def diagnose_l0(g):
 
 
 def diagnose_l1(l1):
+    from .l_experiments import l1_gate
     out = []
-    ok = l1["verdict"]["reward_models_with_selective_advantage"]
+    gate = l1_gate(l1["per_rm"])
     for name, r in l1["per_rm"].items():
-        pos = [k for k, v in r["k"].items() if v[1] > 0]
-        neg = [k for k, v in r["k"].items() if v[2] < 0]
-        sev = "ok" if len(pos) == len(r["k"]) else "warn" if pos else "fail"
+        d = gate["detail"][name]
+        every = len(d["advantage_at_k"]) == len(r["k"])
+        sev = "ok" if every else "info" if d["passed"] else "fail"
         out.append(Finding(sev, f"Reward model '{name}': selective vs balanced",
-                           f"selective beats balanced at k = {pos or 'none'}; balanced beats selective at k = {neg or 'none'} (95% CI excludes 0).",
-                           "" if sev == "ok" else "This reward model gives no consistent incentive to steer; L3 against it should not be expected to show steering.", "L1"))
+                           f"selective beats balanced at k = {d['advantage_at_k'] or 'none'}; balanced beats selective at k = {d['disadvantage_at_k'] or 'none'} (95% CI excludes 0).",
+                           "" if d["passed"] else "This reward model gives no consistent incentive to steer; L3 against it should not be expected to show steering.", "L1"))
         c = r["agree_after_correction_minus_turn1"]
         out.append(Finding("info", f"Reward model '{name}': agreeing after a correction",
-                           f"agree after a correction minus agree at turn 1 = {c[0]:+.2f} (95% CI {c[1]:.2f} to {c[2]:.2f}).", "", "L1"))
-    if not ok:
-        out.append(Finding("fail", "No reward model passes the L1 gate", "No reward model shows a selective advantage at every k.",
+                           f"agree after a correction minus agree at turn 1 = {c[0]:+.2f} (95% CI {c[1]:.2f} to {c[2]:.2f}). The spec predicts above 0. "
+                           "Caution: the two turns differ in conversation length and in what is being agreed to.", "", "L1"))
+    if gate["ok"]:
+        strict = l1["verdict"]["status"] == "supports"
+        out.append(Finding("ok", "L1 gate passed", f"reward models with a selective advantage: {gate['ok']}; strongest: {gate['pick']}. "
+                           f"The claim's strict test (advantage at every k) {'also holds' if strict else 'does not hold, so C1 is reported as partial'}.", "", "L1"))
+    else:
+        out.append(Finding("fail", "No reward model passes the L1 gate", "No reward model shows a selective advantage (CI above 0 at half or more of the k values, below 0 at none).",
                            "Do not spend GPU time on L3 against these reward models.", "L1"))
     return out
 

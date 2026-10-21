@@ -122,6 +122,18 @@
       "id": 11,
       "change": "LLM suite additions not in the spec: (a) L0 assertion probe (user shown no evidence, only a confident wrong claim; mean shift toward it must be <= 0.05); (b) the L1 gate is enforced by the notebook; (c) pre-flight rehearsal with a time/memory projection; (d) early-stop guards (citation collapse, sustained KL, non-finite loss, repeated all-dropped iterations, per-arm time cap); (e) checkpoint/resume and per-part saved results; (f) policy and critic are clipped and optimised separately.",
       "reason": "First real L3 logs (arm A x3 seeds, arm B x1, A100 80GB): the policy stopped citing evidence while 'confidently wrong' rose, five iterations lost every dialogue without a message, KL spiked isolated 15-100x, and a joint gradient clip let the critic error shrink the policy gradients. Arm results produced before (f) used the joint clip and should not be compared with later arms."
+    },
+    {
+      "date": "2026-10-21",
+      "id": 12,
+      "change": "L1 gate separated from the L1 claim. Gate (to proceed to L3): at least one reward model with CI(selective - balanced) > 0 at no fewer than half of the k values and < 0 at none. Claim (C1): advantage at every k, unchanged. The gate picks the strongest passing reward model automatically.",
+      "reason": "CHANGED AFTER SEEING THE FIRST REAL L1 RESULT (disclosed): both reward models favoured selective at k = 1, 2, 3 and neither was significant at k = 5, so the original every-k rule stopped a run although the spec's own gate wording ('a selective advantage for at least one reward model') was met and its 'against the claim' case (no advantage under either) was not. The claim's verdict was not loosened."
+    },
+    {
+      "date": "2026-10-21",
+      "id": 13,
+      "change": "Training diagnosis compares the learned per-turn reward with the best scripted dialogue under the same reward model and warns when it is more than 2 score spreads above it.",
+      "reason": "In the old arm B logs the summed reward reached about +75 per dialogue while the best scripted dialogue scored about -38.7 under the same reward model: a signature of exploiting the reward model, not of learning the intended behaviour."
     }
   ],
   "llm_thresholds": {
