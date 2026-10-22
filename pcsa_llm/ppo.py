@@ -134,13 +134,14 @@ class TurnPPO:
                     mask = torch.ones_like(lp) * (1.0 if s.get("trainable", True) else 0.0)
                     pol = ppo_token_loss(new, s["logp_old"], torch.tensor(s["adv_n"], device=lp.device), mask, cfg.clip)
                     kl = ((s["logp_ref"] - lp) + torch.exp(lp - s["logp_ref"]) - 1.0).mean()      # k3 estimator, >= 0
-                    if s.get("alts") and s.get("trainable", True):         # L5: gradient of -log A(s) through the accepted draws
-                        alt = torch.stack([self._logprobs(s["p_ids"], r, grad=True)[0].sum() for r in s["alts"]])
-                        pol = pol + s["adv_n"] * alt.mean()
                     v = self._value(h)
                     vloss = (v - torch.tensor(float(s["ret"]), device=v.device)) ** 2
                     loss = (pol + cfg.kl_coef * kl + cfg.vf_coef * vloss) / len(batch)
                     loss.backward()
+                    if s.get("alts") and s.get("trainable", True):         # L5: gradient of -log A(s) through the accepted draws
+                        # the term is linear in each draw, so each gets its own backward pass; holding every draw's graph at once ran out of memory
+                        for r in s["alts"]:
+                            (s["adv_n"] / (len(s["alts"]) * len(batch)) * self._logprobs(s["p_ids"], r, grad=True)[0].sum()).backward()
                     diag["loss"].append(float(pol.detach())); diag["kl"].append(float(kl.detach())); diag["vloss"].append(float(vloss.detach()))
                 torch.nn.utils.clip_grad_norm_(self.policy_params, cfg.max_grad_norm)
                 torch.nn.utils.clip_grad_norm_(self.value_params, cfg.max_grad_norm)
